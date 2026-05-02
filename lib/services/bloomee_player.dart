@@ -1,4 +1,3 @@
-import 'dart:developer';
 import 'dart:async';
 import 'dart:convert';
 
@@ -369,10 +368,10 @@ class BloomeeMusicPlayer extends BaseAudioHandler
       },
     );
 
-    // Sync hook 2: throttled broadcast of play/pause/position to guests
+    // Sync hook 2: broadcast play/pause/position — throttled to 100ms.
     EasyThrottle.throttle(
       'sync_state',
-      const Duration(milliseconds: 500),
+      const Duration(milliseconds: 100),
       () {
         SyncService.instance.pushState(
           trackId: _currentTrack.id,
