@@ -4,27 +4,14 @@ import 'dart:math' hide log;
 
 import 'package:firebase_database/firebase_database.dart';
 
-/// Callback fired on the guest side when the host pushes a state update.
-///
-/// [packet]     — the host's playback state.
-/// [localNowMs] — local clock at the time the callback fired, used for
-///               latency correction: correctedPositionMs = packet.positionMs
-///               + (localNowMs - packet.serverMs).
 typedef SyncCallback = void Function(SyncPacket packet, int localNowMs);
 
 // ─── Model ───────────────────────────────────────────────────────────────────
 
 class SyncPacket {
-  /// Composite media ID: "{pluginId}::{localId}"
   final String trackId;
-
-  /// Position the host was at when the packet was written (ms).
   final int positionMs;
-
-  /// Whether the host was playing when the packet was written.
   final bool playing;
-
-  /// Firebase server timestamp (ms since epoch) — used for latency correction.
   final int serverMs;
 
   const SyncPacket({
@@ -51,28 +38,6 @@ enum SyncRole { none, host, guest }
 
 // ─── Service ─────────────────────────────────────────────────────────────────
 
-/// Firebase RTDB–backed online playback sync.
-///
-/// ## Usage
-///
-/// **Host** (the person sharing):
-/// ```dart
-/// final stamp = await SyncService.instance.createRoom();
-/// // share stamp with friends
-/// // then hook: call pushState() on play/pause/seek/track change
-/// ```
-///
-/// **Guest** (the person joining):
-/// ```dart
-/// final ok = await SyncService.instance.joinRoom(stamp, (packet, nowMs) {
-///   final lag = nowMs - packet.serverMs;
-///   final corrected = Duration(milliseconds: packet.positionMs + lag);
-///   player.seek(corrected);
-///   if (packet.playing) player.play() else player.pause();
-/// });
-/// ```
-///
-/// Call [leaveRoom] on both sides when done.
 class SyncService {
   SyncService._();
 
@@ -92,33 +57,33 @@ class SyncService {
   bool get isHost => _role == SyncRole.host;
   bool get isGuest => _role == SyncRole.guest;
 
+  /// Stream of connected guest count — only valid when hosting.
+  Stream<int>? get guestCountStream {
+    if (_role != SyncRole.host || _roomRef == null) return null;
+    return _roomRef!.child('guests').onValue.map(
+      (e) => (e.snapshot.value as int?) ?? 0,
+    );
+  }
+
   // ── Room management ────────────────────────────────────────────────────────
 
-  /// Generate a random 6-character alphanumeric stamp (no ambiguous chars).
   static String _generateStamp() {
     const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
     final rng = Random.secure();
     return List.generate(6, (_) => chars[rng.nextInt(chars.length)]).join();
   }
 
-  /// Create a new sync room and return the stamp to share with guests.
-  ///
-  /// Automatically leaves any existing room first.
   Future<String> createRoom() async {
     await leaveRoom();
     _roomCode = _generateStamp();
     _role = SyncRole.host;
     _roomRef = FirebaseDatabase.instance.ref('syncRooms/$_roomCode');
-    // Write a placeholder so guests can confirm the room exists.
-    await _roomRef!.set({'host': true, 'ts': ServerValue.timestamp});
+    // Initialize with guests counter at 0
+    await _roomRef!.set({'host': true, 'ts': ServerValue.timestamp, 'guests': 0});
     log('SyncService: created room $_roomCode', name: 'SyncService');
     return _roomCode!;
   }
 
-  /// Join an existing room by stamp.
-  ///
-  /// Returns `true` if the room exists, `false` if the stamp is invalid.
-  /// [onSync] is called every time the host pushes a new state.
   Future<bool> joinRoom(String stamp, SyncCallback onSync) async {
     await leaveRoom();
 
@@ -134,11 +99,13 @@ class SyncService {
     _roomRef = ref;
     _onSync = onSync;
 
+    // Write presence so host sees the connection
+    await _roomRef!.child('guests').set(ServerValue.increment(1));
+
     _guestSub = ref.onValue.listen(
       (event) {
         final raw = event.snapshot.value;
         if (raw == null || raw is! Map) return;
-        // Ignore the initial placeholder written by the host on room creation.
         if (raw['trackId'] == null) return;
         try {
           final packet = SyncPacket.fromMap(raw as Map<Object?, Object?>);
@@ -156,12 +123,17 @@ class SyncService {
     return true;
   }
 
-  /// Leave the current room.
-  ///
-  /// Hosts delete their room node; guests just cancel the listener.
   Future<void> leaveRoom() async {
     await _guestSub?.cancel();
     _guestSub = null;
+
+    if (_role == SyncRole.guest && _roomRef != null) {
+      // Decrement guest count on leave
+      await _roomRef!.child('guests').set(ServerValue.increment(-1)).catchError(
+        (Object e) =>
+            log('SyncService: decrement error $e', name: 'SyncService'),
+      );
+    }
 
     if (_role == SyncRole.host && _roomRef != null) {
       await _roomRef!.remove().catchError(
@@ -177,11 +149,10 @@ class SyncService {
     log('SyncService: left room', name: 'SyncService');
   }
 
-  // ── Host push (called from BloomeeMusicPlayer hooks) ──────────────────────
+  // ── Host push ─────────────────────────────────────────────────────────────
 
-  /// Push the current playback state to all guests.
-  ///
-  /// No-op when not in host role or room is not active.
+  /// Push current playback state to guests.
+  /// Uses update() to preserve the guests counter.
   void pushState({
     required String trackId,
     required int positionMs,
@@ -190,11 +161,11 @@ class SyncService {
     if (_role != SyncRole.host || _roomRef == null) return;
 
     _roomRef!
-        .set({
+        .update({
           'trackId': trackId,
           'positionMs': positionMs,
           'playing': playing,
-          'ts': ServerValue.timestamp, // Firebase writes actual server time
+          'ts': ServerValue.timestamp,
         })
         .catchError(
           (Object e) =>

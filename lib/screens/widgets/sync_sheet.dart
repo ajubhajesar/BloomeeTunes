@@ -85,6 +85,17 @@ class _SyncSheetState extends State<_SyncSheet>
 
     final ok = await SyncService.instance.joinRoom(stamp, (packet, localNowMs) {
       if (!mounted) return;
+
+      // Switch track if host is on a different one
+      final currentId = player.mediaItem.valueOrNull?.id;
+      if (currentId != packet.trackId) {
+        final queue = player.queue.valueOrNull ?? [];
+        final idx = queue.indexWhere((mi) => mi.id == packet.trackId);
+        if (idx >= 0) {
+          player.skipToQueueItem(idx); // fire-and-forget; seek below corrects position
+        }
+      }
+
       // Latency-corrected position
       final lag = localNowMs - packet.serverMs;
       final corrected = Duration(
@@ -415,7 +426,48 @@ class _SyncSheetState extends State<_SyncSheet>
             ),
           ),
         ),
-        const SizedBox(height: 24),
+        const SizedBox(height: 16),
+
+        // Guest count
+        StreamBuilder<int>(
+          stream: SyncService.instance.guestCountStream,
+          builder: (context, snapshot) {
+            final count = snapshot.data ?? 0;
+            if (count == 0) {
+              return Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: Text(
+                  'Waiting for listeners…',
+                  style: Default_Theme.secondoryTextStyle.copyWith(
+                    color: Default_Theme.primaryColor1.withValues(alpha: 0.35),
+                    fontSize: 13,
+                  ),
+                  textAlign: TextAlign.center,
+                ),
+              );
+            }
+            return Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(Icons.people_rounded,
+                      color: Default_Theme.accentColor1, size: 16),
+                  const SizedBox(width: 6),
+                  Text(
+                    '$count listener${count == 1 ? '' : 's'} connected',
+                    style: Default_Theme.secondoryTextStyle.copyWith(
+                      color: Default_Theme.accentColor1,
+                      fontSize: 13,
+                    ),
+                  ),
+                ],
+              ),
+            );
+          },
+        ),
+
+        const SizedBox(height: 8),
 
         _LeaveButton(loading: _loading, onTap: _leaveRoom),
       ],
@@ -686,4 +738,3 @@ class _IconBtn extends StatelessWidget {
     );
   }
 }
-
