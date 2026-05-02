@@ -7,6 +7,8 @@ jobs:
   build-android:
     name: Build Android (arm64)
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -32,13 +34,13 @@ jobs:
           echo "VERSION=$VERSION" >> $GITHUB_ENV
 
       - name: Create keystore file
-        run: echo "${{ secrets.KEY_STORE }}" | base64 -d > android/bloomee.jks
+        run: base64 -d android/dev.keystore.b64 > android/bloomee.jks
 
       - name: Create keystore properties
         run: |
-          echo keyPassword=${{ secrets.KEY_PASSWORD }} > android/key.properties
-          echo storePassword=${{ secrets.STORE_PASSWORD }} >> android/key.properties
-          echo keyAlias=${{ secrets.KEY_ALIAS }} >> android/key.properties
+          echo keyPassword=devpass123 > android/key.properties
+          echo storePassword=devpass123 >> android/key.properties
+          echo keyAlias=dev >> android/key.properties
 
       - name: Build APK (arm64-v8a)
         run: flutter build apk --release --target-platform android-arm64 --build-number ${{ github.run_number }}
@@ -53,6 +55,6 @@ jobs:
         with:
           artifacts: build/app/outputs/flutter-apk/bloomee_v${{ env.VERSION }}+${{ github.run_number }}_arm64.apk
           tag: v${{ env.VERSION }}+${{ github.run_number }}
-          token: ${{ secrets.SECRET_KEY }}
+          token: ${{ secrets.GITHUB_TOKEN }}
           prerelease: true
           allowUpdates: true
