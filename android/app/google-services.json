@@ -1,0 +1,30 @@
+{
+  "project_info": {
+    "project_number": "495063158381",
+    "firebase_url": "https://harlsbwo-default-rtdb.asia-southeast1.firebasedatabase.app",
+    "project_id": "harlsbwo",
+    "storage_bucket": "harlsbwo.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:495063158381:android:6407390a1965fa50b0b964",
+        "android_client_info": {
+          "package_name": "ls.bloomee.musicplayer"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyC82YreDDF42dUDJ15ER-BpsAJm1WHUZtI"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

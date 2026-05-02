@@ -1,3 +1,4 @@
+================================================
 import 'dart:developer';
 import 'dart:async';
 import 'dart:convert';
@@ -22,6 +23,7 @@ import 'package:Bloomee/services/player/recently_played_tracker.dart';
 import 'package:Bloomee/services/plugin/plugin_service.dart';
 import 'package:Bloomee/services/meta_resolver/smart_track_replacement_service.dart';
 import 'package:Bloomee/services/discord_service.dart';
+import 'package:Bloomee/services/sync_service.dart';
 import 'package:audio_service/audio_service.dart';
 import 'package:audio_session/audio_session.dart';
 import 'package:async/async.dart';
@@ -367,6 +369,19 @@ class BloomeeMusicPlayer extends BaseAudioHandler
         );
       },
     );
+
+    // Sync hook 2: throttled broadcast of play/pause/position to guests
+    EasyThrottle.throttle(
+      'sync_state',
+      const Duration(milliseconds: 500),
+      () {
+        SyncService.instance.pushState(
+          trackId: _currentTrack.id,
+          positionMs: position.inMilliseconds,
+          playing: playing,
+        );
+      },
+    );
   }
 
   // ─── Current Track ─────────────────────────────────────────────────────────
@@ -400,6 +415,12 @@ class BloomeeMusicPlayer extends BaseAudioHandler
   Future<void> seek(Duration position) async {
     if (_isDisposed) return;
     await engine.seek(position);
+    // Sync hook 3: broadcast explicit seek to guests immediately
+    SyncService.instance.pushState(
+      trackId: _currentTrack.id,
+      positionMs: position.inMilliseconds,
+      playing: engine.playing,
+    );
   }
 
   Future<void> seekNSecForward(Duration n) async {
@@ -688,6 +709,12 @@ class BloomeeMusicPlayer extends BaseAudioHandler
   void _updateCurrentTrack(Track track) {
     _currentTrack = track;
     mediaItem.add(trackToMediaItem(_currentTrack));
+    // Sync hook 1: broadcast track change to guests immediately (position 0)
+    SyncService.instance.pushState(
+      trackId: track.id,
+      positionMs: 0,
+      playing: engine.playing,
+    );
   }
 
   /// Emits current queue, media item, and playback state immediately.
@@ -1141,3 +1168,7 @@ class BloomeeMusicPlayer extends BaseAudioHandler
     await super.stop();
   }
 }
+
+
+
+================================================

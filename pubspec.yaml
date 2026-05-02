@@ -67,6 +67,9 @@ dependencies:
   mime: ^2.0.0
   photo_manager: ^3.9.0
 
+  # Firebase — used for online playback sync (AudioBeam feature)
+  firebase_core: ^3.6.0
+  firebase_database: ^11.1.4
 
   # audio service dependencies
   audio_service: ^0.18.18
@@ -190,4 +193,3 @@ flutter:
     - family: FontAwesome-Solids
       fonts:
         - asset: assets/fonts/fontawesome-free-6.4.0-desktop/otfs/Font Awesome 6 Free-Solid-900.otf
-

@@ -56,6 +56,7 @@ import 'package:responsive_framework/responsive_framework.dart';
 import 'blocs/media_player/bloomee_player_cubit.dart';
 import 'package:flutter_displaymode/flutter_displaymode.dart';
 import 'package:Bloomee/services/discord_service.dart';
+import 'package:firebase_core/firebase_core.dart';
 import 'package:Bloomee/services/db/legacy/legacy_migration_service.dart'
     as legacy_migration;
 import 'package:Bloomee/screens/widgets/legacy_migration_overlay.dart';
@@ -109,6 +110,7 @@ Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   GestureBinding.instance.resamplingEnabled = true;
   MediaKit.ensureInitialized();
+  await Firebase.initializeApp();
   await bootstrapApp();
   setHighRefreshRate();
   await setupPlayerCubit();
@@ -453,3 +455,6 @@ class CustomScrollBehavior extends MaterialScrollBehavior {
         PointerDeviceKind.invertedStylus,
       };
 }
+
+
+
