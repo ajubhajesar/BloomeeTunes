@@ -68,9 +68,8 @@ class _SyncSheetState extends State<_SyncSheet>
 
   Future<void> _createRoom() async {
     setState(() => _loading = true);
-    final stamp = await SyncService.instance.createRoom();
+    await SyncService.instance.createRoom();
     if (mounted) setState(() => _loading = false);
-    _ = stamp; // triggers rebuild via SyncService.instance.roomCode
   }
 
   Future<void> _joinRoom() async {
@@ -687,3 +686,4 @@ class _IconBtn extends StatelessWidget {
     );
   }
 }
+
