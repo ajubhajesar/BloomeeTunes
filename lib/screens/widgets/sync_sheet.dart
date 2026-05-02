@@ -1,7 +1,11 @@
 import 'dart:async';
+import 'package:audio_service/audio_service.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:modal_bottom_sheet/modal_bottom_sheet.dart';
+import 'package:Bloomee/core/adapters/track_adapter.dart';
+import 'package:Bloomee/core/models/exported.dart';
+import 'package:Bloomee/core/models/media_playlist_model.dart';
 import 'package:Bloomee/core/theme/app_theme.dart';
 import 'package:Bloomee/services/sync_service.dart';
 import 'package:Bloomee/blocs/media_player/bloomee_player_cubit.dart';
@@ -40,7 +44,6 @@ class _SyncSheetState extends State<_SyncSheet>
   bool _loading = false;
   String? _error;
 
-  // Pulse animation for the live indicator
   late final AnimationController _pulseCtrl;
   late final Animation<double> _pulseAnim;
 
@@ -79,34 +82,101 @@ class _SyncSheetState extends State<_SyncSheet>
       return;
     }
     _focusNode.unfocus();
-    setState(() { _loading = true; _error = null; });
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
 
     final player = context.read<BloomeePlayerCubit>().bloomeePlayer;
 
+    // Tracks a pending one-shot subscription that fires after a track loads.
+    // Lives in the closure — must survive sheet dismissal.
+    StreamSubscription<MediaItem?>? pendingSeekSub;
+
     final ok = await SyncService.instance.joinRoom(stamp, (packet, localNowMs) {
-      if (!mounted) return;
+      // ⚠ No `mounted` check — callback must keep running after sheet closes.
+      //   It only calls player methods, never touches widget state.
 
-      // Switch track if host is on a different one
+      // Clamp lag to ±5 s to tolerate device clock skew.
+      final lag = (localNowMs - packet.serverMs).clamp(-5000, 5000);
+      final correctedMs = (packet.positionMs + lag).clamp(0, 9999999);
+
       final currentId = player.mediaItem.valueOrNull?.id;
-      if (currentId != packet.trackId) {
-        final queue = player.queue.valueOrNull ?? [];
-        final idx = queue.indexWhere((mi) => mi.id == packet.trackId);
-        if (idx >= 0) {
-          player.skipToQueueItem(idx); // fire-and-forget; seek below corrects position
+
+      if (currentId == packet.trackId) {
+        // ── Already on the right track: sync position + play state ─────────
+        pendingSeekSub?.cancel();
+        pendingSeekSub = null;
+
+        // Only seek when drift > 2 s to avoid constant choppy re-seeks.
+        final driftMs =
+            (player.engine.position.inMilliseconds - correctedMs).abs();
+        if (driftMs > 2000) {
+          player.seek(Duration(milliseconds: correctedMs));
         }
+
+        if (packet.playing && !player.engine.playing) {
+          player.play();
+        } else if (!packet.playing && player.engine.playing) {
+          player.pause();
+        }
+        return;
       }
 
-      // Latency-corrected position
-      final lag = localNowMs - packet.serverMs;
-      final corrected = Duration(
-        milliseconds: (packet.positionMs + lag).clamp(0, 9999999),
-      );
-      player.seek(corrected);
-      if (packet.playing) {
-        player.play();
+      // ── Wrong track: need to switch ────────────────────────────────────────
+      pendingSeekSub?.cancel();
+      pendingSeekSub = null;
+
+      // Try queue first (fast path — no re-resolve needed).
+      final queue = player.queue.valueOrNull ?? [];
+      final idx = queue.indexWhere((mi) => mi.id == packet.trackId);
+
+      if (idx >= 0) {
+        // Track already in guest queue — just jump to it.
+        player.skipToQueueItem(idx);
+      } else if (packet.trackTitle.isNotEmpty) {
+        // Track not in queue — reconstruct it from host-supplied metadata and
+        // load it directly. The plugin will resolve the stream on playback.
+        final track = Track(
+          id: packet.trackId,
+          title: packet.trackTitle,
+          artists: packet.trackArtist.isNotEmpty
+              ? [ArtistSummary(id: '', name: packet.trackArtist)]
+              : [],
+          thumbnail: Artwork(
+            url: packet.trackThumbnail,
+            layout: ImageLayout.square,
+          ),
+          durationMs: packet.trackDurationMs != null
+              ? BigInt.from(packet.trackDurationMs!)
+              : null,
+          isExplicit: false,
+        );
+        // loadPlaylist replaces the queue with just this track and starts it.
+        player.loadPlaylist(
+          tracksToPlaylist('Synced', [track]),
+          idx: 0,
+          doPlay: packet.playing,
+        );
       } else {
-        player.pause();
+        // No metadata — can't do anything.
+        return;
       }
+
+      // Wait for the media item to reflect the target track, then seek.
+      // Seeking before the engine has loaded the track is a no-op.
+      pendingSeekSub = player.mediaItem.listen((mi) {
+        if (mi?.id == packet.trackId) {
+          pendingSeekSub?.cancel();
+          pendingSeekSub = null;
+          player.seek(Duration(milliseconds: correctedMs));
+          if (packet.playing) {
+            player.play();
+          } else {
+            player.pause();
+          }
+        }
+      });
     });
 
     if (mounted) {
@@ -162,7 +232,6 @@ class _SyncSheetState extends State<_SyncSheet>
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              // ── Drag handle ──
               Center(
                 child: Container(
                   width: 40,
@@ -174,12 +243,8 @@ class _SyncSheetState extends State<_SyncSheet>
                   ),
                 ),
               ),
-
-              // ── Header ──
               _buildHeader(role),
               const SizedBox(height: 28),
-
-              // ── Body ──
               AnimatedSwitcher(
                 duration: const Duration(milliseconds: 260),
                 transitionBuilder: (child, anim) => FadeTransition(
@@ -204,8 +269,6 @@ class _SyncSheetState extends State<_SyncSheet>
       ),
     );
   }
-
-  // ── Header ────────────────────────────────────────────────────────────────
 
   Widget _buildHeader(SyncRole role) {
     final (icon, label) = switch (role) {
@@ -281,23 +344,18 @@ class _SyncSheetState extends State<_SyncSheet>
     );
   }
 
-  // ── Idle body ─────────────────────────────────────────────────────────────
-
   Widget _buildIdleBody() {
     return Column(
       key: const ValueKey('idle'),
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        // Create room button
         _PrimaryButton(
           label: 'Create a Room',
           icon: Icons.add_circle_outline_rounded,
           loading: _loading,
           onTap: _createRoom,
         ),
-
-        // Divider
         Padding(
           padding: const EdgeInsets.symmetric(vertical: 20),
           child: Row(
@@ -325,8 +383,6 @@ class _SyncSheetState extends State<_SyncSheet>
             ],
           ),
         ),
-
-        // Join row
         Row(
           children: [
             Expanded(
@@ -344,7 +400,6 @@ class _SyncSheetState extends State<_SyncSheet>
             ),
           ],
         ),
-
         if (_error != null) ...[
           const SizedBox(height: 8),
           Text(
@@ -358,8 +413,6 @@ class _SyncSheetState extends State<_SyncSheet>
       ],
     );
   }
-
-  // ── Host body ─────────────────────────────────────────────────────────────
 
   Widget _buildHostBody(String stamp) {
     return Column(
@@ -376,8 +429,6 @@ class _SyncSheetState extends State<_SyncSheet>
           textAlign: TextAlign.center,
         ),
         const SizedBox(height: 18),
-
-        // Big stamp display
         GestureDetector(
           onTap: () => _copyStamp(stamp),
           child: Container(
@@ -427,8 +478,6 @@ class _SyncSheetState extends State<_SyncSheet>
           ),
         ),
         const SizedBox(height: 16),
-
-        // Guest count
         StreamBuilder<int>(
           stream: SyncService.instance.guestCountStream,
           builder: (context, snapshot) {
@@ -466,15 +515,11 @@ class _SyncSheetState extends State<_SyncSheet>
             );
           },
         ),
-
         const SizedBox(height: 8),
-
         _LeaveButton(loading: _loading, onTap: _leaveRoom),
       ],
     );
   }
-
-  // ── Guest body ────────────────────────────────────────────────────────────
 
   Widget _buildGuestBody(String stamp) {
     return Column(

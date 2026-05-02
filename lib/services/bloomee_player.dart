@@ -378,6 +378,10 @@ class BloomeeMusicPlayer extends BaseAudioHandler
           trackId: _currentTrack.id,
           positionMs: position.inMilliseconds,
           playing: playing,
+          trackTitle: _currentTrack.title,
+          trackArtist: _currentTrack.artists.map((a) => a.name).join(', '),
+          trackThumbnail: _currentTrack.thumbnail.url,
+          trackDurationMs: _currentTrack.durationMs?.toInt(),
         );
       },
     );
@@ -419,6 +423,10 @@ class BloomeeMusicPlayer extends BaseAudioHandler
       trackId: _currentTrack.id,
       positionMs: position.inMilliseconds,
       playing: engine.playing,
+      trackTitle: _currentTrack.title,
+      trackArtist: _currentTrack.artists.map((a) => a.name).join(', '),
+      trackThumbnail: _currentTrack.thumbnail.url,
+      trackDurationMs: _currentTrack.durationMs?.toInt(),
     );
   }
 
@@ -713,6 +721,10 @@ class BloomeeMusicPlayer extends BaseAudioHandler
       trackId: track.id,
       positionMs: 0,
       playing: engine.playing,
+      trackTitle: track.title,
+      trackArtist: track.artists.map((a) => a.name).join(', '),
+      trackThumbnail: track.thumbnail.url,
+      trackDurationMs: track.durationMs?.toInt(),
     );
   }
 

@@ -13,12 +13,21 @@ class SyncPacket {
   final int positionMs;
   final bool playing;
   final int serverMs;
+  // Track metadata — lets guests load the song even if not in their queue.
+  final String trackTitle;
+  final String trackArtist;
+  final String trackThumbnail;
+  final int? trackDurationMs;
 
   const SyncPacket({
     required this.trackId,
     required this.positionMs,
     required this.playing,
     required this.serverMs,
+    this.trackTitle = '',
+    this.trackArtist = '',
+    this.trackThumbnail = '',
+    this.trackDurationMs,
   });
 
   factory SyncPacket.fromMap(Map<Object?, Object?> map) {
@@ -28,6 +37,10 @@ class SyncPacket {
       playing: (map['playing'] as bool?) ?? false,
       serverMs: (map['ts'] as num?)?.toInt() ??
           DateTime.now().millisecondsSinceEpoch,
+      trackTitle: (map['trackTitle'] as String?) ?? '',
+      trackArtist: (map['trackArtist'] as String?) ?? '',
+      trackThumbnail: (map['trackThumbnail'] as String?) ?? '',
+      trackDurationMs: (map['trackDurationMs'] as num?)?.toInt(),
     );
   }
 }
@@ -153,20 +166,31 @@ class SyncService {
 
   /// Push current playback state to guests.
   /// Uses update() to preserve the guests counter.
+  /// Track metadata lets guests load the song even if not in their queue.
   void pushState({
     required String trackId,
     required int positionMs,
     required bool playing,
+    String trackTitle = '',
+    String trackArtist = '',
+    String trackThumbnail = '',
+    int? trackDurationMs,
   }) {
     if (_role != SyncRole.host || _roomRef == null) return;
 
+    final data = <String, dynamic>{
+      'trackId': trackId,
+      'positionMs': positionMs,
+      'playing': playing,
+      'ts': ServerValue.timestamp,
+      'trackTitle': trackTitle,
+      'trackArtist': trackArtist,
+      'trackThumbnail': trackThumbnail,
+      if (trackDurationMs != null) 'trackDurationMs': trackDurationMs,
+    };
+
     _roomRef!
-        .update({
-          'trackId': trackId,
-          'positionMs': positionMs,
-          'playing': playing,
-          'ts': ServerValue.timestamp,
-        })
+        .update(data)
         .catchError(
           (Object e) =>
               log('SyncService: push error $e', name: 'SyncService'),
