@@ -54,14 +54,40 @@ jobs:
         run: |
           sed -i 's/applicationId = "ls.bloomee.musicplayer"/applicationId = "ls.bloomee.musicplayer.clone"/' \
             android/app/build.gradle.kts
-          # Also patch namespace so resources don't clash
           sed -i 's/namespace = "ls.bloomee.musicplayer"/namespace = "ls.bloomee.musicplayer.clone"/' \
             android/app/build.gradle.kts
 
-      - name: Patch app label so you can tell them apart on homescreen
+      - name: Patch app label
         run: |
           sed -i 's/android:label="[^"]*"/android:label="Bloomee Clone"/' \
             android/app/src/main/AndroidManifest.xml
+
+      - name: Add clone package to google-services.json
+        run: |
+          # Duplicate the existing client entry with the clone package name.
+          # Both point to the same Firebase project — no console changes needed.
+          python3 - << 'PYEOF'
+          import json, copy
+
+          with open('android/app/google-services.json') as f:
+              gs = json.load(f)
+
+          original = gs['client'][0]
+          clone    = copy.deepcopy(original)
+          clone['client_info']['android_client_info']['package_name'] = \
+              'ls.bloomee.musicplayer.clone'
+
+          # Only add if not already present
+          packages = [c['client_info']['android_client_info']['package_name']
+                      for c in gs['client']]
+          if 'ls.bloomee.musicplayer.clone' not in packages:
+              gs['client'].append(clone)
+
+          with open('android/app/google-services.json', 'w') as f:
+              json.dump(gs, f, indent=2)
+
+          print('google-services.json patched')
+          PYEOF
 
       - name: Create keystore file
         run: base64 -d android/dev.keystore.b64 > android/bloomee.jks
@@ -80,7 +106,7 @@ jobs:
           mv build/app/outputs/flutter-apk/app-release.apk \
              build/app/outputs/flutter-apk/bloomee_clone_${{ github.run_number }}_arm64.apk
 
-      - name: Upload as artifact (no release — test build only)
+      - name: Upload as artifact
         uses: actions/upload-artifact@v4
         with:
           name: bloomee-clone-${{ github.run_number }}
