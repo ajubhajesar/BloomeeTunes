@@ -75,22 +75,23 @@ class _SyncSheetState extends State<_SyncSheet>
 
   SyncCallback _makeCallback(BloomeeMusicPlayer player) {
     return (SyncPacket packet) {
-      // 1. Track switch if needed
+      // Best-effort track switch
       final currentId = player.mediaItem.valueOrNull?.id;
-      if (currentId != packet.trackId) {
+      if (currentId != null && currentId != packet.trackId) {
         final queue = player.queue.valueOrNull ?? [];
         final idx   = queue.indexWhere((mi) => mi.id == packet.trackId);
         if (idx >= 0) {
+          // Track found — switch it, then seek after it loads
           player.skipToQueueItem(idx);
-          // Seek after a short delay to let the engine load the track
           Future.delayed(const Duration(milliseconds: 350), () {
             _applyPosition(player, packet);
           });
+          return;
         }
-        return; // don't seek on wrong track
+        // Track not in queue — fall through, sync position on whatever's playing
       }
 
-      // 2. Same track — just correct position + play state
+      // Same track (or track not found) — sync position + play state now
       _applyPosition(player, packet);
     };
   }
