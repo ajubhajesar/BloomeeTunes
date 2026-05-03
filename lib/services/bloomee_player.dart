@@ -174,6 +174,9 @@ class BloomeeMusicPlayer extends BaseAudioHandler
         break;
       case AudioInterruptionType.pause:
         if (_resumeAfterInterruption) {
+          // Resync from room state before resuming — prevents plugin reinitialization
+          // from pushing the local stale track to the room (Bug 2).
+          await SyncService.instance.resyncOnResume();
           final granted = await _activateAudioSession();
           if (granted && !_isDisposed) await play();
         }

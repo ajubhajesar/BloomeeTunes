@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:developer';
 import 'dart:io';
 import 'dart:math' hide log;
@@ -27,8 +28,8 @@ class NtpClock {
   int  _offsetMs = 0;
   bool _synced   = false;
 
-  int  now()    => DateTime.now().millisecondsSinceEpoch + _offsetMs;
-  bool get synced => _synced;
+  int  now()        => DateTime.now().millisecondsSinceEpoch + _offsetMs;
+  bool get synced   => _synced;
 
   Future<void> sync() async {
     for (final server in _servers) {
@@ -93,10 +94,7 @@ class NtpClock {
   }
 }
 
-// ─── Device name generator ───────────────────────────────────────────────────
-//
-// Generates a persistent two-word fun name (e.g. "Swift Mango").
-// Stored in SharedPreferences so the same device always has the same name.
+// ─── Device name ─────────────────────────────────────────────────────────────
 
 class DeviceNamer {
   static const _adj = [
@@ -105,7 +103,6 @@ class DeviceNamer {
     'Mint', 'Nova', 'Onyx', 'Plum', 'Rosy', 'Sage',
     'Teal', 'Umber', 'Vivid', 'Wild', 'Zeal', 'Amber',
   ];
-
   static const _noun = [
     'Mango', 'Pixel', 'Comet', 'River', 'Storm', 'Flare',
     'Prism', 'Echo', 'Blaze', 'Drift', 'Pulse', 'Spark',
@@ -129,7 +126,83 @@ class DeviceNamer {
   }
 }
 
-// ─── Models ──────────────────────────────────────────────────────────────────
+// ─── Device ID (persistent across sessions) ───────────────────────────────────
+
+class DeviceIdStore {
+  static Future<String> get() async {
+    try {
+      final dir  = await getApplicationSupportDirectory();
+      final file = File('${dir.path}/sync_device_id.txt');
+      if (await file.exists()) return (await file.readAsString()).trim();
+      const c   = 'abcdefghijklmnopqrstuvwxyz0123456789';
+      final rng = Random.secure();
+      final id  = List.generate(12, (_) => c[rng.nextInt(c.length)]).join();
+      await file.writeAsString(id);
+      return id;
+    } catch (_) {
+      const c   = 'abcdefghijklmnopqrstuvwxyz0123456789';
+      final rng = Random.secure();
+      return List.generate(12, (_) => c[rng.nextInt(c.length)]).join();
+    }
+  }
+}
+
+// ─── Saved group model ────────────────────────────────────────────────────────
+
+class SavedGroup {
+  final String code;
+  final String name;
+
+  const SavedGroup({required this.code, required this.name});
+
+  Map<String, dynamic> toJson() => {'code': code, 'name': name};
+
+  factory SavedGroup.fromJson(Map<String, dynamic> j) =>
+      SavedGroup(code: j['code'] as String, name: j['name'] as String);
+}
+
+// ─── Local group store ────────────────────────────────────────────────────────
+
+class GroupStore {
+  static Future<File> _file() async {
+    final dir = await getApplicationSupportDirectory();
+    return File('${dir.path}/sync_groups.json');
+  }
+
+  static Future<List<SavedGroup>> load() async {
+    try {
+      final f = await _file();
+      if (!await f.exists()) return [];
+      final raw = jsonDecode(await f.readAsString()) as List;
+      return raw
+          .map((e) => SavedGroup.fromJson(e as Map<String, dynamic>))
+          .toList();
+    } catch (_) {
+      return [];
+    }
+  }
+
+  static Future<void> _write(List<SavedGroup> groups) async {
+    final f = await _file();
+    await f.writeAsString(
+        jsonEncode(groups.map((g) => g.toJson()).toList()));
+  }
+
+  static Future<void> add(SavedGroup group) async {
+    final groups = await load();
+    if (groups.any((g) => g.code == group.code)) return;
+    groups.add(group);
+    await _write(groups);
+  }
+
+  static Future<void> remove(String code) async {
+    final groups = await load();
+    groups.removeWhere((g) => g.code == code);
+    await _write(groups);
+  }
+}
+
+// ─── Models ───────────────────────────────────────────────────────────────────
 
 class SyncPacket {
   final String trackId;
@@ -147,113 +220,111 @@ class SyncPacket {
     required this.positionMs,
     required this.playing,
     required this.ntpTs,
-    this.pushedBy       = '',
-    this.trackTitle     = '',
-    this.trackArtist    = '',
-    this.trackThumbnail = '',
+    this.pushedBy        = '',
+    this.trackTitle      = '',
+    this.trackArtist     = '',
+    this.trackThumbnail  = '',
     this.trackDurationMs,
   });
 
   factory SyncPacket.fromMap(Map<Object?, Object?> map) => SyncPacket(
-    trackId:         (map['trackId']        as String?) ?? '',
-    positionMs:      (map['positionMs']     as num?)?.toInt() ?? 0,
-    playing:         (map['playing']        as bool?) ?? false,
-    ntpTs:           (map['ntpTs']          as num?)?.toInt() ??
+    trackId:         (map['trackId']         as String?) ?? '',
+    positionMs:      (map['positionMs']      as num?)?.toInt() ?? 0,
+    playing:         (map['playing']         as bool?)  ?? false,
+    ntpTs:           (map['ntpTs']           as num?)?.toInt() ??
                      DateTime.now().millisecondsSinceEpoch,
-    pushedBy:        (map['pushedBy']       as String?) ?? '',
-    trackTitle:      (map['trackTitle']     as String?) ?? '',
-    trackArtist:     (map['trackArtist']    as String?) ?? '',
-    trackThumbnail:  (map['trackThumbnail'] as String?) ?? '',
+    pushedBy:        (map['pushedBy']        as String?) ?? '',
+    trackTitle:      (map['trackTitle']      as String?) ?? '',
+    trackArtist:     (map['trackArtist']     as String?) ?? '',
+    trackThumbnail:  (map['trackThumbnail']  as String?) ?? '',
     trackDurationMs: (map['trackDurationMs'] as num?)?.toInt(),
   );
 }
 
-/// One entry in the devices list.
+/// Online device entry — from sessions/{code}/online/{deviceId}.
 class SyncDevice {
   final String deviceId;
   final String name;
   final int    offsetMs;
-  final int    lastSeenMs;
 
   const SyncDevice({
     required this.deviceId,
     required this.name,
     required this.offsetMs,
-    required this.lastSeenMs,
   });
 
   factory SyncDevice.fromEntry(String id, Map<Object?, Object?> map) => SyncDevice(
-    deviceId:   id,
-    name:       (map['name']       as String?) ?? 'Unknown',
-    offsetMs:   (map['offsetMs']   as num?)?.toInt() ?? 0,
-    lastSeenMs: (map['lastSeenMs'] as num?)?.toInt() ?? 0,
+    deviceId: id,
+    name:     (map['name']     as String?) ?? 'Unknown',
+    offsetMs: (map['offsetMs'] as num?)?.toInt() ?? 0,
   );
 }
 
-// ─── Role ────────────────────────────────────────────────────────────────────
+// ─── Role ─────────────────────────────────────────────────────────────────────
 
-enum SyncRole { none, host, member }
+enum SyncRole { none, connected }
 
-// ─── Service ─────────────────────────────────────────────────────────────────
+// ─── Service ──────────────────────────────────────────────────────────────────
 //
 // RTDB layout:
 //
-//  syncRooms/{stamp}/
-//    host: deviceId
+//  groups/{code}/
+//    name: "AJ Squad"
+//    roster/
+//      {deviceId}: "Swift Mango"   ← permanent, survives disconnects
+//
+//  sessions/{code}/
 //    state/
 //      trackId, positionMs, playing, ntpTs, pushedBy, trackTitle, …
-//    devices/
+//    online/
 //      {deviceId}/
-//        name:       "Swift Mango"
-//        offsetMs:   -200          ← writable by ANYONE
-//        lastSeenMs: 1234567890
+//        name:     "Swift Mango"
+//        offsetMs: 0              ← onDisconnect removes entire entry
+//
+// Anyone online can push state. No host concept.
 
 class SyncService {
   SyncService._();
   static final SyncService instance = SyncService._();
 
-  // Stable per-session device ID.
-  final String _deviceId = _makeId();
-  static String _makeId() {
-    const c = 'abcdefghijklmnopqrstuvwxyz0123456789';
-    final r = Random.secure();
-    return List.generate(12, (_) => c[r.nextInt(c.length)]).join();
-  }
-
+  // Resolved once during _init()
+  String _deviceId   = '';
   String _deviceName = 'Unknown';
-  String get deviceId   => _deviceId;
-  String get deviceName => _deviceName;
+  bool   _initialized = false;
 
-  SyncRole _role    = SyncRole.none;
-  String?  _roomCode;
-  DatabaseReference? _roomRef;
+  SyncRole _role       = SyncRole.none;
+  String?  _activeCode;
+  DatabaseReference? _sessionRef;    // sessions/{code}
 
-  // Callbacks set by the sheet when joining/creating.
   SyncCallback?   _onSync;
   SeekCallback?   _seekCallback;
   PositionGetter? _positionGetter;
 
   StreamSubscription<DatabaseEvent>? _stateSub;
-  StreamSubscription<DatabaseEvent>? _devicesSub;
+  StreamSubscription<DatabaseEvent>? _offsetSub;
 
-  bool _syncDriven  = false;
-  int  _myOffsetMs  = 0;
+  // _syncDriven:   suppress pushState while applying incoming room state / on resume
+  // _offsetDriven: suppress pushState while seeking due to offset adjustment
+  bool _syncDriven   = false;
+  bool _offsetDriven = false;
+  int  _myOffsetMs   = 0;
 
   // ── Getters ───────────────────────────────────────────────────────────────
 
-  SyncRole get role     => _role;
-  String?  get roomCode => _roomCode;
-  bool     get isActive => _role != SyncRole.none;
-  bool     get isHost   => _role == SyncRole.host;
-  int      get myOffsetMs => _myOffsetMs;
-  int      ntpNow()    => NtpClock.instance.now();
+  SyncRole get role        => _role;
+  String?  get activeCode  => _activeCode;
+  bool     get isActive    => _role == SyncRole.connected;
+  String   get deviceId    => _deviceId;
+  String   get deviceName  => _deviceName;
+  int      get myOffsetMs  => _myOffsetMs;
+  int      ntpNow()        => NtpClock.instance.now();
 
-  /// Stream of all devices in the room — use in UI.
-  Stream<List<SyncDevice>>? get devicesStream {
-    if (_roomRef == null) return null;
-    return _roomRef!.child('devices').onValue.map((event) {
+  /// Live list of online devices for the current session.
+  Stream<List<SyncDevice>>? get onlineStream {
+    if (_sessionRef == null) return null;
+    return _sessionRef!.child('online').onValue.map((event) {
       final raw = event.snapshot.value;
-      if (raw == null || raw is! Map) return [];
+      if (raw == null || raw is! Map) return <SyncDevice>[];
       return raw.entries
           .map((e) => SyncDevice.fromEntry(
                 e.key as String,
@@ -264,90 +335,148 @@ class SyncService {
     });
   }
 
-  // ── NTP ───────────────────────────────────────────────────────────────────
-
-  Future<void> _syncNtp() async {
-    if (!NtpClock.instance.synced) await NtpClock.instance.sync();
+  /// Online member count for any group code — used in the group list UI.
+  /// Creates a transient listener; caller cancels via StreamSubscription.
+  Stream<int> onlineCountStream(String code) {
+    return FirebaseDatabase.instance
+        .ref('sessions/$code/online')
+        .onValue
+        .map((event) {
+          final raw = event.snapshot.value;
+          if (raw == null || raw is! Map) return 0;
+          return (raw as Map).length;
+        });
   }
 
-  // ── Room management ───────────────────────────────────────────────────────
+  // ── Init ──────────────────────────────────────────────────────────────────
 
-  static String _generateStamp() {
+  Future<void> _init() async {
+    if (_initialized) return;
+    _deviceId   = await DeviceIdStore.get();
+    _deviceName = await DeviceNamer.get();
+    if (!NtpClock.instance.synced) await NtpClock.instance.sync();
+    _initialized = true;
+  }
+
+  // ── Group operations ──────────────────────────────────────────────────────
+
+  static String _generateCode() {
     const c = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
     final r = Random.secure();
     return List.generate(6, (_) => c[r.nextInt(c.length)]).join();
   }
 
-  Future<String> createRoom({
+  /// Creates a new group in RTDB, saves it locally. Returns the new group.
+  Future<SavedGroup> createGroup(String name) async {
+    await _init();
+    final code = _generateCode();
+    final ref  = FirebaseDatabase.instance.ref('groups/$code');
+    await ref.set({'name': name});
+    await ref.child('roster/$_deviceId').set(_deviceName);
+    final group = SavedGroup(code: code, name: name);
+    await GroupStore.add(group);
+    log('SyncService: created group $code "$name"', name: 'SyncService');
+    return group;
+  }
+
+  /// Joins an existing group. Returns the group on success, null if not found.
+  Future<SavedGroup?> joinGroup(String code) async {
+    await _init();
+    final upper = code.toUpperCase();
+    final ref   = FirebaseDatabase.instance.ref('groups/$upper');
+    final snap  = await ref.get();
+    if (!snap.exists) return null;
+
+    final name = (snap.child('name').value as String?) ?? upper;
+    await ref.child('roster/$_deviceId').set(_deviceName);
+    final group = SavedGroup(code: upper, name: name);
+    await GroupStore.add(group);
+    log('SyncService: joined group $upper "$name"', name: 'SyncService');
+    return group;
+  }
+
+  /// Permanently removes self from group roster and local storage.
+  /// Disconnects session if currently connected to this group.
+  Future<void> leaveGroup(String code) async {
+    await _init();
+    if (_activeCode == code) await disconnectSession();
+    await FirebaseDatabase.instance
+        .ref('groups/$code/roster/$_deviceId')
+        .remove()
+        .catchError((_) {});
+    await GroupStore.remove(code);
+    log('SyncService: left group $code', name: 'SyncService');
+  }
+
+  // ── Session operations ────────────────────────────────────────────────────
+
+  /// Connect to a session (write online presence, start listeners).
+  /// Idempotent — calling while already connected to the same code is a no-op.
+  Future<void> connectSession(
+    String code, {
     required SyncCallback   onSync,
     required SeekCallback   onSeek,
     required PositionGetter getPosition,
   }) async {
-    await leaveRoom();
-    await _syncNtp();
-    _deviceName = await DeviceNamer.get();
+    if (_activeCode == code && _role == SyncRole.connected) return;
+    await disconnectSession();
+    await _init();
 
-    _roomCode       = _generateStamp();
-    _role           = SyncRole.host;
-    _roomRef        = FirebaseDatabase.instance.ref('syncRooms/$_roomCode');
+    _activeCode     = code;
+    _role           = SyncRole.connected;
+    _sessionRef     = FirebaseDatabase.instance.ref('sessions/$code');
     _onSync         = onSync;
     _seekCallback   = onSeek;
     _positionGetter = getPosition;
     _myOffsetMs     = 0;
 
-    await _roomRef!.set({'host': _deviceId, 'ts': ServerValue.timestamp});
-    await _registerDevice();
-    _startListeners();
-
-    log('SyncService: created room $_roomCode as "$_deviceName"', name: 'SyncService');
-    return _roomCode!;
-  }
-
-  Future<bool> joinRoom({
-    required String         stamp,
-    required SyncCallback   onSync,
-    required SeekCallback   onSeek,
-    required PositionGetter getPosition,
-  }) async {
-    await leaveRoom();
-    await _syncNtp();
-    _deviceName = await DeviceNamer.get();
-
-    final ref  = FirebaseDatabase.instance.ref('syncRooms/$stamp');
-    final snap = await ref.get();
-    if (!snap.exists) return false;
-
-    _roomCode       = stamp.toUpperCase();
-    _role           = SyncRole.member;
-    _roomRef        = ref;
-    _onSync         = onSync;
-    _seekCallback   = onSeek;
-    _positionGetter = getPosition;
-    _myOffsetMs     = 0;
-
-    await _registerDevice();
-    _startListeners();
-
-    log('SyncService: joined room $_roomCode as "$_deviceName"', name: 'SyncService');
-    return true;
-  }
-
-  Future<void> _registerDevice() async {
-    await _roomRef!.child('devices/$_deviceId').set({
-      'name':       _deviceName,
-      'offsetMs':   0,
-      'lastSeenMs': ServerValue.timestamp,
+    // Write online presence
+    await _sessionRef!.child('online/$_deviceId').set({
+      'name':     _deviceName,
+      'offsetMs': 0,
     });
-    // Remove our device entry when we disconnect (Firebase onDisconnect).
-    await _roomRef!
-        .child('devices/$_deviceId')
+    // Auto-remove entire online entry on disconnect — ghost problem is
+    // structurally impossible since Firebase handles cleanup even on crash.
+    await _sessionRef!.child('online/$_deviceId').onDisconnect().remove();
+
+    _startListeners();
+    log('SyncService: connected to session $code as "$_deviceName"', name: 'SyncService');
+  }
+
+  /// Disconnect from current session (stay in the group).
+  Future<void> disconnectSession() async {
+    await _stateSub?.cancel();
+    await _offsetSub?.cancel();
+    _stateSub  = null;
+    _offsetSub = null;
+
+    // Cancel Firebase's auto-remove hook, then remove manually.
+    await _sessionRef
+        ?.child('online/$_deviceId')
         .onDisconnect()
-        .remove();
+        .cancel()
+        .catchError((_) {});
+    await _sessionRef
+        ?.child('online/$_deviceId')
+        .remove()
+        .catchError((_) {});
+
+    _sessionRef     = null;
+    _activeCode     = null;
+    _role           = SyncRole.none;
+    _onSync         = null;
+    _seekCallback   = null;
+    _positionGetter = null;
+    _syncDriven     = false;
+    _offsetDriven   = false;
+    _myOffsetMs     = 0;
+
+    log('SyncService: disconnected from session', name: 'SyncService');
   }
 
   void _startListeners() {
-    // ── State (track / position / playing) ──────────────────────────────────
-    _stateSub = _roomRef!.child('state').onValue.listen((event) {
+    // ── State listener ───────────────────────────────────────────────────────
+    _stateSub = _sessionRef!.child('state').onValue.listen((event) {
       final raw = event.snapshot.value;
       if (raw == null || raw is! Map) return;
       if ((raw['pushedBy'] as String?) == _deviceId) return; // own echo
@@ -362,83 +491,79 @@ class SyncService {
       }
     });
 
-    // ── Devices (offset changes for all devices) ─────────────────────────────
-    _devicesSub = _roomRef!.child('devices').onChildChanged.listen((event) {
-      final changedId = event.snapshot.key;
-      if (changedId != _deviceId) return; // only care about our own offset
-
+    // ── Offset listener (Bug 1 fix) ──────────────────────────────────────────
+    // Listen directly on our own offsetMs field — no snapshot-behind lag from
+    // listening on the parent 'online' node.
+    _offsetSub = _sessionRef!
+        .child('online/$_deviceId/offsetMs')
+        .onValue
+        .listen((event) {
       final raw = event.snapshot.value;
-      if (raw == null || raw is! Map) return;
+      if (raw == null) return;
 
-      final newOffset = (raw['offsetMs'] as num?)?.toInt() ?? 0;
-      final delta     = newOffset - _myOffsetMs;
-      _myOffsetMs     = newOffset;
+      final newOffset = (raw as num).toInt();
+      if (newOffset == _myOffsetMs) return;
 
-      // Immediately seek by the delta — no need to wait for next packet.
+      final delta  = newOffset - _myOffsetMs;
+      _myOffsetMs  = newOffset;
+
       final current = _positionGetter?.call() ?? Duration.zero;
       final adjusted = Duration(
         milliseconds: (current.inMilliseconds + delta).clamp(0, 9999999),
       );
-      _seekCallback?.call(adjusted);
 
-      log('SyncService: own offset changed to ${newOffset}ms, seeked by ${delta}ms',
+      // Bug 1b fix: flag the seek so pushState ignores it.
+      // Offset correction is personal — not a room event.
+      _offsetDriven = true;
+      _seekCallback?.call(adjusted);
+      Future.delayed(const Duration(milliseconds: 400), () => _offsetDriven = false);
+
+      log('SyncService: offset → ${newOffset}ms, seeked by ${delta}ms',
           name: 'SyncService');
     });
   }
 
-  Future<void> leaveRoom() async {
-    await _stateSub?.cancel();
-    await _devicesSub?.cancel();
-    _stateSub  = null;
-    _devicesSub = null;
+  // ── Resync on resume (Bug 2 fix) ──────────────────────────────────────────
 
-    // Remove our device entry.
-    await _roomRef?.child('devices/$_deviceId').remove().catchError((_) {});
+  /// Call this before resuming playback after an audio interruption.
+  /// Fetches current room state from RTDB and applies it, while blocking
+  /// the plugin reinitialization from overwriting the room with stale data.
+  Future<void> resyncOnResume() async {
+    if (!isActive || _sessionRef == null) return;
 
-    // Host cleans up the whole room.
-    if (_role == SyncRole.host) {
-      await _roomRef?.remove().catchError((_) {});
+    // Block pushState for 2 s during plugin reinitialization.
+    _syncDriven = true;
+    Future.delayed(const Duration(seconds: 2), () => _syncDriven = false);
+
+    try {
+      final snap = await _sessionRef!.child('state').get();
+      if (!snap.exists || snap.value == null) return;
+      final raw = snap.value;
+      if (raw is! Map) return;
+      final packet = SyncPacket.fromMap(raw as Map<Object?, Object?>);
+      _onSync?.call(packet);
+      log('SyncService: resynced on resume', name: 'SyncService');
+    } catch (e) {
+      log('SyncService: resync failed: $e', name: 'SyncService');
     }
-
-    _roomRef        = null;
-    _roomCode       = null;
-    _role           = SyncRole.none;
-    _onSync         = null;
-    _seekCallback   = null;
-    _positionGetter = null;
-    _syncDriven     = false;
-    _myOffsetMs     = 0;
-
-    log('SyncService: left room', name: 'SyncService');
   }
 
-  // ── Per-device offset (anyone writes anyone's) ────────────────────────────
-
-  /// Write [offsetMs] for [targetDeviceId] to RTDB.
-  /// If it's our own device, the _devicesSub listener applies it immediately.
-  Future<void> setDeviceOffset(String targetDeviceId, int offsetMs) async {
-    if (!isActive || _roomRef == null) return;
-    await _roomRef!
-        .child('devices/$targetDeviceId/offsetMs')
-        .set(offsetMs)
-        .catchError((Object e) =>
-            log('SyncService: offset write error $e', name: 'SyncService'));
-  }
-
-  // ── Push playback state ───────────────────────────────────────────────────
+  // ── Push state ────────────────────────────────────────────────────────────
 
   void pushState({
     required String trackId,
     required int    positionMs,
     required bool   playing,
-    String trackTitle     = '',
-    String trackArtist    = '',
-    String trackThumbnail = '',
+    String trackTitle      = '',
+    String trackArtist     = '',
+    String trackThumbnail  = '',
     int?   trackDurationMs,
   }) {
-    if (!isActive || _roomRef == null || _syncDriven) return;
+    // Don't push while applying incoming state, during offset-driven seek,
+    // or during post-interruption plugin reinitialization.
+    if (!isActive || _sessionRef == null || _syncDriven || _offsetDriven) return;
 
-    _roomRef!.child('state').update({
+    _sessionRef!.child('state').update({
       'trackId':        trackId,
       'positionMs':     positionMs,
       'playing':        playing,
@@ -450,5 +575,16 @@ class SyncService {
       if (trackDurationMs != null) 'trackDurationMs': trackDurationMs,
     }).catchError((Object e) =>
         log('SyncService: push error $e', name: 'SyncService'));
+  }
+
+  // ── Offset ────────────────────────────────────────────────────────────────
+
+  Future<void> setDeviceOffset(String targetDeviceId, int offsetMs) async {
+    if (!isActive || _sessionRef == null) return;
+    await _sessionRef!
+        .child('online/$targetDeviceId/offsetMs')
+        .set(offsetMs)
+        .catchError((Object e) =>
+            log('SyncService: offset write error $e', name: 'SyncService'));
   }
 }
