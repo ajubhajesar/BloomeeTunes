@@ -6,6 +6,7 @@ import 'package:Bloomee/core/theme/app_theme.dart';
 import 'package:Bloomee/services/sync_service.dart';
 import 'package:Bloomee/blocs/media_player/bloomee_player_cubit.dart';
 import 'package:Bloomee/services/bloomee_player.dart';
+import 'package:audio_service/audio_service.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 
 // ─── Entry point ─────────────────────────────────────────────────────────────
@@ -70,38 +71,42 @@ class _SyncSheetState extends State<_SyncSheet>
 
   // ── Sync callback ─────────────────────────────────────────────────────────
   //
-  // Capture [player] directly so the callback survives sheet dismissal.
-  // No `mounted` check, no `context.read` — widget lifecycle is irrelevant.
+  // Player captured at join/create time — callback survives sheet dismissal.
+  // No `mounted`, no `context` — completely decoupled from widget lifecycle.
 
   SyncCallback _makeCallback(BloomeeMusicPlayer player) {
     return (SyncPacket packet) {
-      // Best-effort track switch
+      final lag         = SyncService.instance.ntpNow() - packet.ntpTs;
+      final correctedMs = (packet.positionMs + lag + SyncService.instance.myOffsetMs)
+          .clamp(0, 9999999);
+      final corrected   = Duration(milliseconds: correctedMs);
+
       final currentId = player.mediaItem.valueOrNull?.id;
-      if (currentId != null && currentId != packet.trackId) {
-        final queue = player.queue.valueOrNull ?? [];
-        final idx   = queue.indexWhere((mi) => mi.id == packet.trackId);
-        if (idx >= 0) {
-          // Track found — switch it, then seek after it loads
-          player.skipToQueueItem(idx);
-          Future.delayed(const Duration(milliseconds: 350), () {
-            _applyPosition(player, packet);
-          });
-          return;
+      if (currentId != packet.trackId && packet.trackId.isNotEmpty) {
+        // Different track — resolve + play directly from trackId (plugin resolves stream URL)
+        final mi = MediaItem(
+          id:       packet.trackId,
+          title:    packet.trackTitle.isNotEmpty  ? packet.trackTitle  : 'Unknown',
+          artist:   packet.trackArtist.isNotEmpty ? packet.trackArtist : '',
+          artUri:   packet.trackThumbnail.isNotEmpty
+                        ? Uri.tryParse(packet.trackThumbnail)
+                        : null,
+          duration: packet.trackDurationMs != null
+                        ? Duration(milliseconds: packet.trackDurationMs!)
+                        : null,
+        );
+        player.playMediaItem(mi, initialPosition: corrected);
+        // play/pause state applied after track loads
+        if (!packet.playing) {
+          Future.delayed(const Duration(milliseconds: 500), player.pause);
         }
-        // Track not in queue — fall through, sync position on whatever's playing
+        return;
       }
 
-      // Same track (or track not found) — sync position + play state now
-      _applyPosition(player, packet);
+      // Same track — just sync position + play state
+      player.seek(corrected);
+      if (packet.playing) { player.play(); } else { player.pause(); }
     };
-  }
-
-  void _applyPosition(BloomeeMusicPlayer player, SyncPacket packet) {
-    final lag         = SyncService.instance.ntpNow() - packet.ntpTs;
-    final correctedMs = (packet.positionMs + lag + SyncService.instance.myOffsetMs)
-        .clamp(0, 9999999);
-    player.seek(Duration(milliseconds: correctedMs));
-    if (packet.playing) { player.play(); } else { player.pause(); }
   }
 
   // ── Actions ──────────────────────────────────────────────────────────────
