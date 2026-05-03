@@ -5,70 +5,53 @@ import 'dart:math' hide log;
 import 'dart:typed_data';
 
 import 'package:firebase_database/firebase_database.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
-typedef SyncCallback = void Function(SyncPacket packet);
+typedef SyncCallback   = void Function(SyncPacket packet);
+typedef SeekCallback   = void Function(Duration position);
+typedef PositionGetter = Duration Function();
 
 // ─── NTP Clock ───────────────────────────────────────────────────────────────
-//
-// Ported from AudioBeam's ClockSync.kt (same algorithm).
-// Runs 5 UDP rounds against pool.ntp.org + time.google.com,
-// picks the min-RTT sample, and caches the offset for the session.
-//
-// Formula per round:
-//   T1 = local send time
-//   T2 = server receive time (extracted from NTP response bytes 32–39)
-//   T4 = local receive time
-//   offset = T2 − (T1 + T4) / 2
-//
-// Min-RTT selection ensures the sample with least queuing delay is used,
-// giving the most accurate one-way estimate (same logic as AudioBeam).
 
 class NtpClock {
   NtpClock._();
   static final NtpClock instance = NtpClock._();
 
-  static const _servers  = ['pool.ntp.org', 'time.google.com'];
-  static const _port     = 123;
-  static const _delta    = 2208988800; // seconds from 1900 epoch to 1970
-  static const _rounds   = 5;
-  static const _maxRttMs = 500;
+  static const _servers   = ['pool.ntp.org', 'time.google.com'];
+  static const _port      = 123;
+  static const _delta     = 2208988800;
+  static const _rounds    = 5;
+  static const _maxRttMs  = 500;
   static const _timeoutMs = 2000;
 
-  int _offsetMs = 0;
-  bool _synced  = false;
+  int  _offsetMs = 0;
+  bool _synced   = false;
 
-  /// NTP-corrected current time in ms since epoch.
-  int now() => DateTime.now().millisecondsSinceEpoch + _offsetMs;
+  int  now()    => DateTime.now().millisecondsSinceEpoch + _offsetMs;
   bool get synced => _synced;
 
-  /// Runs NTP sync against all servers; keeps going until one succeeds.
   Future<void> sync() async {
     for (final server in _servers) {
       final offset = await _tryServer(server);
       if (offset != null) {
         _offsetMs = offset;
         _synced   = true;
-        log('NtpClock: synced via $server offset=${_offsetMs}ms',
-            name: 'NtpClock');
+        log('NtpClock: synced via $server offset=${_offsetMs}ms', name: 'NtpClock');
         return;
       }
     }
-    // All failed — use local clock as-is (offset stays 0).
     _synced = true;
     log('NtpClock: all servers failed, using local clock', name: 'NtpClock');
   }
 
   Future<int?> _tryServer(String server) async {
-    int bestRtt    = _maxRttMs + 1;
-    int bestOffset = 0;
-    bool got       = false;
+    int  bestRtt    = _maxRttMs + 1;
+    int  bestOffset = 0;
+    bool got        = false;
 
     List<InternetAddress> addrs;
-    try {
-      addrs = await InternetAddress.lookup(server);
-    } catch (_) {
-      return null;
-    }
+    try { addrs = await InternetAddress.lookup(server); }
+    catch (_) { return null; }
     final addr = addrs.first;
 
     for (int i = 0; i < _rounds; i++) {
@@ -76,343 +59,393 @@ class NtpClock {
       try {
         sock = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
         sock.readEventsEnabled = true;
-
-        // NTP request packet — mode 3 (client), version 3
         final req = Uint8List(48)..first = 0x1B;
         final t1  = DateTime.now().millisecondsSinceEpoch;
         sock.send(req, addr, _port);
 
-        // Wait for response with timeout
         Datagram? dg;
         final deadline = t1 + _timeoutMs;
         await for (final ev in sock) {
-          if (ev == RawSocketEvent.read) {
-            dg = sock.receive();
-            break;
-          }
+          if (ev == RawSocketEvent.read) { dg = sock.receive(); break; }
           if (DateTime.now().millisecondsSinceEpoch > deadline) break;
         }
         final t4 = DateTime.now().millisecondsSinceEpoch;
-
         if (dg == null || dg.data.length < 48) continue;
 
-        // Extract server receive timestamp from bytes 32–39 (T2 in NTP)
-        // NTP stores seconds in the first 4 bytes of each timestamp field,
-        // fractions in the next 4 (we ignore fractions for ms accuracy).
         final data = dg.data;
         int sec = 0;
-        for (int b = 32; b < 36; b++) {
-          sec = (sec << 8) | (data[b] & 0xFF);
-        }
-        final t2 = (sec - _delta) * 1000; // convert to Unix ms
-
+        for (int b = 32; b < 36; b++) sec = (sec << 8) | (data[b] & 0xFF);
+        final t2     = (sec - _delta) * 1000;
         final rtt    = t4 - t1;
         final offset = t2 - (t1 + t4) ~/ 2;
 
         if (rtt < bestRtt && rtt < _maxRttMs) {
-          bestRtt    = rtt;
-          bestOffset = offset;
-          got        = true;
-          log('NtpClock: round $i rtt=${rtt}ms offset=${offset}ms server=$server',
-              name: 'NtpClock');
+          bestRtt = rtt; bestOffset = offset; got = true;
         }
       } catch (e) {
         log('NtpClock: round $i failed: $e', name: 'NtpClock');
       } finally {
         sock?.close();
       }
-
-      if (i < _rounds - 1) {
-        await Future.delayed(const Duration(milliseconds: 30));
-      }
+      if (i < _rounds - 1) await Future.delayed(const Duration(milliseconds: 30));
     }
-
     return got ? bestOffset : null;
   }
 }
 
-// ─── Model ───────────────────────────────────────────────────────────────────
+// ─── Device name generator ───────────────────────────────────────────────────
+//
+// Generates a persistent two-word fun name (e.g. "Swift Mango").
+// Stored in SharedPreferences so the same device always has the same name.
+
+class DeviceNamer {
+  static const _key = 'sync_device_name';
+
+  static const _adj = [
+    'Swift', 'Bold', 'Calm', 'Dusk', 'Epic', 'Fawn',
+    'Gold', 'Hazy', 'Icy', 'Jade', 'Keen', 'Lush',
+    'Mint', 'Nova', 'Onyx', 'Plum', 'Rosy', 'Sage',
+    'Teal', 'Umber', 'Vivid', 'Wild', 'Zeal', 'Amber',
+  ];
+
+  static const _noun = [
+    'Mango', 'Pixel', 'Comet', 'River', 'Storm', 'Flare',
+    'Prism', 'Echo', 'Blaze', 'Drift', 'Pulse', 'Spark',
+    'Wave', 'Frost', 'Bloom', 'Dune', 'Glow', 'Haze',
+    'Isle', 'Knot', 'Lark', 'Moss', 'Nook', 'Opal',
+  ];
+
+  static Future<String> get() async {
+    final prefs = await SharedPreferences.getInstance();
+    final saved = prefs.getString(_key);
+    if (saved != null) return saved;
+    final rng  = Random.secure();
+    final name = '${_adj[rng.nextInt(_adj.length)]} ${_noun[rng.nextInt(_noun.length)]}';
+    await prefs.setString(_key, name);
+    return name;
+  }
+}
+
+// ─── Models ──────────────────────────────────────────────────────────────────
 
 class SyncPacket {
   final String trackId;
-  final int positionMs;
-  final bool playing;
-
-  /// NTP-corrected timestamp at the moment the host wrote this packet.
-  final int ntpTs;
-
+  final int    positionMs;
+  final bool   playing;
+  final int    ntpTs;
   final String pushedBy;
   final String trackTitle;
   final String trackArtist;
   final String trackThumbnail;
-  final int? trackDurationMs;
+  final int?   trackDurationMs;
 
   const SyncPacket({
     required this.trackId,
     required this.positionMs,
     required this.playing,
     required this.ntpTs,
-    this.pushedBy = '',
-    this.trackTitle = '',
-    this.trackArtist = '',
+    this.pushedBy       = '',
+    this.trackTitle     = '',
+    this.trackArtist    = '',
     this.trackThumbnail = '',
     this.trackDurationMs,
   });
 
-  factory SyncPacket.fromMap(Map<Object?, Object?> map) {
-    return SyncPacket(
-      trackId:         (map['trackId']      as String?) ?? '',
-      positionMs:      (map['positionMs']   as num?)?.toInt() ?? 0,
-      playing:         (map['playing']      as bool?) ?? false,
-      ntpTs:           (map['ntpTs']        as num?)?.toInt() ??
-                       DateTime.now().millisecondsSinceEpoch,
-      pushedBy:        (map['pushedBy']     as String?) ?? '',
-      trackTitle:      (map['trackTitle']   as String?) ?? '',
-      trackArtist:     (map['trackArtist']  as String?) ?? '',
-      trackThumbnail:  (map['trackThumbnail'] as String?) ?? '',
-      trackDurationMs: (map['trackDurationMs'] as num?)?.toInt(),
-    );
-  }
+  factory SyncPacket.fromMap(Map<Object?, Object?> map) => SyncPacket(
+    trackId:         (map['trackId']        as String?) ?? '',
+    positionMs:      (map['positionMs']     as num?)?.toInt() ?? 0,
+    playing:         (map['playing']        as bool?) ?? false,
+    ntpTs:           (map['ntpTs']          as num?)?.toInt() ??
+                     DateTime.now().millisecondsSinceEpoch,
+    pushedBy:        (map['pushedBy']       as String?) ?? '',
+    trackTitle:      (map['trackTitle']     as String?) ?? '',
+    trackArtist:     (map['trackArtist']    as String?) ?? '',
+    trackThumbnail:  (map['trackThumbnail'] as String?) ?? '',
+    trackDurationMs: (map['trackDurationMs'] as num?)?.toInt(),
+  );
+}
+
+/// One entry in the devices list.
+class SyncDevice {
+  final String deviceId;
+  final String name;
+  final int    offsetMs;
+  final int    lastSeenMs;
+
+  const SyncDevice({
+    required this.deviceId,
+    required this.name,
+    required this.offsetMs,
+    required this.lastSeenMs,
+  });
+
+  factory SyncDevice.fromEntry(String id, Map<Object?, Object?> map) => SyncDevice(
+    deviceId:   id,
+    name:       (map['name']       as String?) ?? 'Unknown',
+    offsetMs:   (map['offsetMs']   as num?)?.toInt() ?? 0,
+    lastSeenMs: (map['lastSeenMs'] as num?)?.toInt() ?? 0,
+  );
 }
 
 // ─── Role ────────────────────────────────────────────────────────────────────
 
-/// [host]   — created the room; cleans it up on leave.
-/// [member] — joined by code; equal control (collaborative).
-/// [none]   — not in any room.
 enum SyncRole { none, host, member }
 
 // ─── Service ─────────────────────────────────────────────────────────────────
+//
+// RTDB layout:
+//
+//  syncRooms/{stamp}/
+//    host: deviceId
+//    state/
+//      trackId, positionMs, playing, ntpTs, pushedBy, trackTitle, …
+//    devices/
+//      {deviceId}/
+//        name:       "Swift Mango"
+//        offsetMs:   -200          ← writable by ANYONE
+//        lastSeenMs: 1234567890
 
 class SyncService {
   SyncService._();
   static final SyncService instance = SyncService._();
 
-  // Per-session unique device ID — filters our own echo from RTDB.
-  final String _deviceId = _randomId();
-  static String _randomId() {
-    const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
-    final rng = Random.secure();
-    return List.generate(12, (_) => chars[rng.nextInt(chars.length)]).join();
+  // Stable per-session device ID.
+  final String _deviceId = _makeId();
+  static String _makeId() {
+    const c = 'abcdefghijklmnopqrstuvwxyz0123456789';
+    final r = Random.secure();
+    return List.generate(12, (_) => c[r.nextInt(c.length)]).join();
   }
 
-  SyncRole _role     = SyncRole.none;
+  String _deviceName = 'Unknown';
+  String get deviceId   => _deviceId;
+  String get deviceName => _deviceName;
+
+  SyncRole _role    = SyncRole.none;
   String?  _roomCode;
   DatabaseReference? _roomRef;
 
+  // Callbacks set by the sheet when joining/creating.
+  SyncCallback?   _onSync;
+  SeekCallback?   _seekCallback;
+  PositionGetter? _positionGetter;
+
   StreamSubscription<DatabaseEvent>? _stateSub;
-  StreamSubscription<DatabaseEvent>? _offsetSub;
+  StreamSubscription<DatabaseEvent>? _devicesSub;
 
-  SyncCallback? _onSync;
-
-  // Suppress re-broadcasting when we applied an incoming packet.
-  bool _syncDriven = false;
-
-  // Shared room offset — lives in RTDB, everyone reads/writes.
-  int _roomOffsetMs = 0;
+  bool _syncDriven  = false;
+  int  _myOffsetMs  = 0;
 
   // ── Getters ───────────────────────────────────────────────────────────────
 
-  SyncRole get role       => _role;
-  String?  get roomCode   => _roomCode;
-  bool     get isActive   => _role != SyncRole.none;
-  bool     get isHost     => _role == SyncRole.host;
+  SyncRole get role     => _role;
+  String?  get roomCode => _roomCode;
+  bool     get isActive => _role != SyncRole.none;
+  bool     get isHost   => _role == SyncRole.host;
+  int      get myOffsetMs => _myOffsetMs;
+  int      ntpNow()    => NtpClock.instance.now();
 
-  /// Current shared room offset in ms.
-  int get roomOffsetMs => _roomOffsetMs;
-
-  /// Stream of member count for this room.
-  Stream<int>? get memberCountStream {
+  /// Stream of all devices in the room — use in UI.
+  Stream<List<SyncDevice>>? get devicesStream {
     if (_roomRef == null) return null;
-    return _roomRef!.child('members').onValue.map(
-      (e) => (e.snapshot.value as num?)?.toInt() ?? 0,
-    );
-  }
-
-  /// Stream of the shared offset — use in UI to keep slider in sync.
-  Stream<int>? get roomOffsetStream {
-    if (_roomRef == null) return null;
-    return _roomRef!.child('roomOffsetMs').onValue.map(
-      (e) => (e.snapshot.value as num?)?.toInt() ?? 0,
-    );
+    return _roomRef!.child('devices').onValue.map((event) {
+      final raw = event.snapshot.value;
+      if (raw == null || raw is! Map) return [];
+      return raw.entries
+          .map((e) => SyncDevice.fromEntry(
+                e.key as String,
+                e.value as Map<Object?, Object?>,
+              ))
+          .toList()
+        ..sort((a, b) => a.name.compareTo(b.name));
+    });
   }
 
   // ── NTP ───────────────────────────────────────────────────────────────────
 
-  /// NTP-corrected now. Used for both writing and reading lag.
-  int ntpNow() => NtpClock.instance.now();
-
-  /// Kick off NTP sync in background. Call once per room join/create.
   Future<void> _syncNtp() async {
-    if (!NtpClock.instance.synced) {
-      log('SyncService: starting NTP sync…', name: 'SyncService');
-      await NtpClock.instance.sync();
-    }
+    if (!NtpClock.instance.synced) await NtpClock.instance.sync();
   }
 
   // ── Room management ───────────────────────────────────────────────────────
 
   static String _generateStamp() {
-    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-    final rng = Random.secure();
-    return List.generate(6, (_) => chars[rng.nextInt(chars.length)]).join();
+    const c = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+    final r = Random.secure();
+    return List.generate(6, (_) => c[r.nextInt(c.length)]).join();
   }
 
-  Future<String> createRoom(SyncCallback onSync) async {
+  Future<String> createRoom({
+    required SyncCallback   onSync,
+    required SeekCallback   onSeek,
+    required PositionGetter getPosition,
+  }) async {
     await leaveRoom();
     await _syncNtp();
+    _deviceName = await DeviceNamer.get();
 
-    _roomCode = _generateStamp();
-    _role     = SyncRole.host;
-    _roomRef  = FirebaseDatabase.instance.ref('syncRooms/$_roomCode');
-    _onSync   = onSync;
+    _roomCode       = _generateStamp();
+    _role           = SyncRole.host;
+    _roomRef        = FirebaseDatabase.instance.ref('syncRooms/$_roomCode');
+    _onSync         = onSync;
+    _seekCallback   = onSeek;
+    _positionGetter = getPosition;
+    _myOffsetMs     = 0;
 
-    await _roomRef!.set({
-      'host':         _deviceId,
-      'ts':           ServerValue.timestamp,
-      'members':      1,
-      'roomOffsetMs': 0,
-    });
-
+    await _roomRef!.set({'host': _deviceId, 'ts': ServerValue.timestamp});
+    await _registerDevice();
     _startListeners();
-    log('SyncService: created room $_roomCode', name: 'SyncService');
+
+    log('SyncService: created room $_roomCode as "$_deviceName"', name: 'SyncService');
     return _roomCode!;
   }
 
-  Future<bool> joinRoom(String stamp, SyncCallback onSync) async {
+  Future<bool> joinRoom({
+    required String         stamp,
+    required SyncCallback   onSync,
+    required SeekCallback   onSeek,
+    required PositionGetter getPosition,
+  }) async {
     await leaveRoom();
     await _syncNtp();
+    _deviceName = await DeviceNamer.get();
 
     final ref  = FirebaseDatabase.instance.ref('syncRooms/$stamp');
     final snap = await ref.get();
-    if (!snap.exists) {
-      log('SyncService: room $stamp not found', name: 'SyncService');
-      return false;
-    }
+    if (!snap.exists) return false;
 
-    _roomCode = stamp.toUpperCase();
-    _role     = SyncRole.member;
-    _roomRef  = ref;
-    _onSync   = onSync;
+    _roomCode       = stamp.toUpperCase();
+    _role           = SyncRole.member;
+    _roomRef        = ref;
+    _onSync         = onSync;
+    _seekCallback   = onSeek;
+    _positionGetter = getPosition;
+    _myOffsetMs     = 0;
 
-    await _roomRef!.child('members').set(ServerValue.increment(1));
+    await _registerDevice();
     _startListeners();
 
-    log('SyncService: joined room $_roomCode', name: 'SyncService');
+    log('SyncService: joined room $_roomCode as "$_deviceName"', name: 'SyncService');
     return true;
   }
 
+  Future<void> _registerDevice() async {
+    await _roomRef!.child('devices/$_deviceId').set({
+      'name':       _deviceName,
+      'offsetMs':   0,
+      'lastSeenMs': ServerValue.timestamp,
+    });
+    // Remove our device entry when we disconnect (Firebase onDisconnect).
+    await _roomRef!
+        .child('devices/$_deviceId')
+        .onDisconnect()
+        .remove();
+  }
+
   void _startListeners() {
-    // ── State listener (track / position / playing) ──
-    _stateSub = _roomRef!.onValue.listen(
-      (event) {
-        final raw = event.snapshot.value;
-        if (raw == null || raw is! Map) return;
-        if (raw['trackId'] == null) return;
-        // Ignore our own pushes.
-        if ((raw['pushedBy'] as String?) == _deviceId) return;
+    // ── State (track / position / playing) ──────────────────────────────────
+    _stateSub = _roomRef!.child('state').onValue.listen((event) {
+      final raw = event.snapshot.value;
+      if (raw == null || raw is! Map) return;
+      if ((raw['pushedBy'] as String?) == _deviceId) return; // own echo
 
-        try {
-          final packet = SyncPacket.fromMap(raw as Map<Object?, Object?>);
-          _syncDriven = true;
-          _onSync?.call(packet);
-          // Reset flag after the async seek has had time to fire.
-          Future.delayed(
-            const Duration(milliseconds: 400),
-            () => _syncDriven = false,
-          );
-        } catch (e) {
-          log('SyncService: parse error $e', name: 'SyncService');
-        }
-      },
-      onError: (Object e) =>
-          log('SyncService: state listener error $e', name: 'SyncService'),
-    );
+      try {
+        final packet = SyncPacket.fromMap(raw as Map<Object?, Object?>);
+        _syncDriven = true;
+        _onSync?.call(packet);
+        Future.delayed(const Duration(milliseconds: 400), () => _syncDriven = false);
+      } catch (e) {
+        log('SyncService: state parse error $e', name: 'SyncService');
+      }
+    });
 
-    // ── Offset listener (shared slider) ──
-    _offsetSub = _roomRef!.child('roomOffsetMs').onValue.listen(
-      (event) {
-        _roomOffsetMs = (event.snapshot.value as num?)?.toInt() ?? 0;
-        log('SyncService: roomOffset=${_roomOffsetMs}ms', name: 'SyncService');
-      },
-    );
+    // ── Devices (offset changes for all devices) ─────────────────────────────
+    _devicesSub = _roomRef!.child('devices').onChildChanged.listen((event) {
+      final changedId = event.snapshot.key;
+      if (changedId != _deviceId) return; // only care about our own offset
+
+      final raw = event.snapshot.value;
+      if (raw == null || raw is! Map) return;
+
+      final newOffset = (raw['offsetMs'] as num?)?.toInt() ?? 0;
+      final delta     = newOffset - _myOffsetMs;
+      _myOffsetMs     = newOffset;
+
+      // Immediately seek by the delta — no need to wait for next packet.
+      final current = _positionGetter?.call() ?? Duration.zero;
+      final adjusted = Duration(
+        milliseconds: (current.inMilliseconds + delta).clamp(0, 9999999),
+      );
+      _seekCallback?.call(adjusted);
+
+      log('SyncService: own offset changed to ${newOffset}ms, seeked by ${delta}ms',
+          name: 'SyncService');
+    });
   }
 
   Future<void> leaveRoom() async {
     await _stateSub?.cancel();
-    await _offsetSub?.cancel();
-    _stateSub = null;
-    _offsetSub = null;
+    await _devicesSub?.cancel();
+    _stateSub  = null;
+    _devicesSub = null;
 
-    if (_role == SyncRole.member && _roomRef != null) {
-      await _roomRef!
-          .child('members')
-          .set(ServerValue.increment(-1))
-          .catchError((_) {});
-    }
-    if (_role == SyncRole.host && _roomRef != null) {
-      await _roomRef!.remove().catchError((_) {});
+    // Remove our device entry.
+    await _roomRef?.child('devices/$_deviceId').remove().catchError((_) {});
+
+    // Host cleans up the whole room.
+    if (_role == SyncRole.host) {
+      await _roomRef?.remove().catchError((_) {});
     }
 
-    _roomRef      = null;
-    _roomCode     = null;
-    _role         = SyncRole.none;
-    _onSync       = null;
-    _syncDriven   = false;
-    _roomOffsetMs = 0;
+    _roomRef        = null;
+    _roomCode       = null;
+    _role           = SyncRole.none;
+    _onSync         = null;
+    _seekCallback   = null;
+    _positionGetter = null;
+    _syncDriven     = false;
+    _myOffsetMs     = 0;
 
     log('SyncService: left room', name: 'SyncService');
   }
 
-  // ── Shared offset (anyone can call) ──────────────────────────────────────
+  // ── Per-device offset (anyone writes anyone's) ────────────────────────────
 
-  /// Write the new shared offset to RTDB. All members apply it immediately.
-  Future<void> setRoomOffset(int offsetMs) async {
+  /// Write [offsetMs] for [targetDeviceId] to RTDB.
+  /// If it's our own device, the _devicesSub listener applies it immediately.
+  Future<void> setDeviceOffset(String targetDeviceId, int offsetMs) async {
     if (!isActive || _roomRef == null) return;
-    _roomOffsetMs = offsetMs;
     await _roomRef!
-        .child('roomOffsetMs')
+        .child('devices/$targetDeviceId/offsetMs')
         .set(offsetMs)
-        .catchError(
-          (Object e) =>
-              log('SyncService: offset write error $e', name: 'SyncService'),
-        );
+        .catchError((Object e) =>
+            log('SyncService: offset write error $e', name: 'SyncService'));
   }
 
-  // ── Push (all members — collaborative) ───────────────────────────────────
+  // ── Push playback state ───────────────────────────────────────────────────
 
-  /// Push playback state. Any active member can call this.
-  /// No-op when not in a room or when a received packet is being applied
-  /// (prevents feedback loops).
   void pushState({
     required String trackId,
-    required int positionMs,
-    required bool playing,
+    required int    positionMs,
+    required bool   playing,
     String trackTitle     = '',
     String trackArtist    = '',
     String trackThumbnail = '',
     int?   trackDurationMs,
   }) {
-    if (!isActive || _roomRef == null) return;
-    if (_syncDriven) return; // Don't echo incoming packets back.
+    if (!isActive || _roomRef == null || _syncDriven) return;
 
-    final data = <String, dynamic>{
+    _roomRef!.child('state').update({
       'trackId':        trackId,
       'positionMs':     positionMs,
       'playing':        playing,
-      'ntpTs':          ntpNow(),   // NTP-corrected timestamp
+      'ntpTs':          ntpNow(),
       'pushedBy':       _deviceId,
       'trackTitle':     trackTitle,
       'trackArtist':    trackArtist,
       'trackThumbnail': trackThumbnail,
       if (trackDurationMs != null) 'trackDurationMs': trackDurationMs,
-    };
-
-    _roomRef!
-        .update(data)
-        .catchError(
-          (Object e) =>
-              log('SyncService: push error $e', name: 'SyncService'),
-        );
+    }).catchError((Object e) =>
+        log('SyncService: push error $e', name: 'SyncService'));
   }
 }
