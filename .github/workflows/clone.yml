@@ -62,19 +62,25 @@ jobs:
           sed -i 's/android:label="[^"]*"/android:label="Bloomee Clone"/' \
             android/app/src/main/AndroidManifest.xml
 
-      - name: Patch audio session — disable audio focus so both apps play simultaneously
+      - name: Patch audio focus - clone skips audio focus so both apps coexist
         run: |
-          # Replace AudioSessionConfiguration.music() with a config that requests
-          # no audio focus, allowing both apps to play at the same time.
-          sed -i \
-            's/await session\.configure(const AudioSessionConfiguration\.music());/await session.configure(const AudioSessionConfiguration(androidAudioAttributes: AndroidAudioAttributes(contentType: AndroidAudioContentType.music, flags: AndroidAudioFlags.none, usage: AndroidAudioUsage.media), androidAudioFocusGainType: AndroidAudioFocusGainType.none, androidWillPauseWhenDucked: false));/' \
-            lib/services/bloomee_player.dart
+          python3 - << 'PYEOF'
+          path = 'lib/services/bloomee_player.dart'
+          f = open(path).read()
 
-          # Make _activateAudioSession always return true without requesting focus.
-          # The clone piggybacks on system audio without competing.
-          sed -i \
-            's/return await session\.setActive(true);/\/\/ Clone: skip audio focus — allows coexistence with main app.\n      return true;/' \
-            lib/services/bloomee_player.dart
+          # Replace _activateAudioSession to skip setActive entirely.
+          # Returns true unconditionally — clone plays without competing for focus.
+          old = 'return await session.setActive(true);'
+          new = ('// Clone build: skip audio focus so main app and clone'
+                 ' can play simultaneously.\n      return true;')
+
+          if old in f:
+              f = f.replace(old, new, 1)
+              open(path, 'w').write(f)
+              print('Audio focus patch applied')
+          else:
+              print(f'WARNING: target string not found in {path}')
+          PYEOF
 
       - name: Add clone package to google-services.json
         run: |
@@ -83,7 +89,7 @@ jobs:
           with open('android/app/google-services.json') as f:
               gs = json.load(f)
           original = gs['client'][0]
-          clone    = copy.deepcopy(original)
+          clone = copy.deepcopy(original)
           clone['client_info']['android_client_info']['package_name'] = \
               'ls.bloomee.musicplayer.clone'
           packages = [c['client_info']['android_client_info']['package_name']
