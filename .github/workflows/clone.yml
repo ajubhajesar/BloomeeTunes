@@ -62,30 +62,36 @@ jobs:
           sed -i 's/android:label="[^"]*"/android:label="Bloomee Clone"/' \
             android/app/src/main/AndroidManifest.xml
 
+      - name: Patch audio session — disable audio focus so both apps play simultaneously
+        run: |
+          # Replace AudioSessionConfiguration.music() with a config that requests
+          # no audio focus, allowing both apps to play at the same time.
+          sed -i \
+            's/await session\.configure(const AudioSessionConfiguration\.music());/await session.configure(const AudioSessionConfiguration(androidAudioAttributes: AndroidAudioAttributes(contentType: AndroidAudioContentType.music, flags: AndroidAudioFlags.none, usage: AndroidAudioUsage.media), androidAudioFocusGainType: AndroidAudioFocusGainType.none, androidWillPauseWhenDucked: false));/' \
+            lib/services/bloomee_player.dart
+
+          # Make _activateAudioSession always return true without requesting focus.
+          # The clone piggybacks on system audio without competing.
+          sed -i \
+            's/return await session\.setActive(true);/\/\/ Clone: skip audio focus — allows coexistence with main app.\n      return true;/' \
+            lib/services/bloomee_player.dart
+
       - name: Add clone package to google-services.json
         run: |
-          # Duplicate the existing client entry with the clone package name.
-          # Both point to the same Firebase project — no console changes needed.
           python3 - << 'PYEOF'
           import json, copy
-
           with open('android/app/google-services.json') as f:
               gs = json.load(f)
-
           original = gs['client'][0]
           clone    = copy.deepcopy(original)
           clone['client_info']['android_client_info']['package_name'] = \
               'ls.bloomee.musicplayer.clone'
-
-          # Only add if not already present
           packages = [c['client_info']['android_client_info']['package_name']
                       for c in gs['client']]
           if 'ls.bloomee.musicplayer.clone' not in packages:
               gs['client'].append(clone)
-
           with open('android/app/google-services.json', 'w') as f:
               json.dump(gs, f, indent=2)
-
           print('google-services.json patched')
           PYEOF
 
