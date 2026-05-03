@@ -5,6 +5,7 @@ import 'package:modal_bottom_sheet/modal_bottom_sheet.dart';
 import 'package:Bloomee/core/theme/app_theme.dart';
 import 'package:Bloomee/services/sync_service.dart';
 import 'package:Bloomee/blocs/media_player/bloomee_player_cubit.dart';
+import 'package:Bloomee/services/bloomee_player.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 
 // ─── Entry point ─────────────────────────────────────────────────────────────
@@ -68,29 +69,50 @@ class _SyncSheetState extends State<_SyncSheet>
   }
 
   // ── Sync callback ─────────────────────────────────────────────────────────
+  //
+  // Capture [player] directly so the callback survives sheet dismissal.
+  // No `mounted` check, no `context.read` — widget lifecycle is irrelevant.
 
-  void _onSync(SyncPacket packet) {
-    if (!mounted) return;
-    final player = context.read<BloomeePlayerCubit>().bloomeePlayer;
-    final lag        = SyncService.instance.ntpNow() - packet.ntpTs;
-    final myOffset   = SyncService.instance.myOffsetMs;
-    final correctedMs = (packet.positionMs + lag + myOffset).clamp(0, 9999999);
+  SyncCallback _makeCallback(BloomeeMusicPlayer player) {
+    return (SyncPacket packet) {
+      // 1. Track switch if needed
+      final currentId = player.mediaItem.valueOrNull?.id;
+      if (currentId != packet.trackId) {
+        final queue = player.queue.valueOrNull ?? [];
+        final idx   = queue.indexWhere((mi) => mi.id == packet.trackId);
+        if (idx >= 0) {
+          player.skipToQueueItem(idx);
+          // Seek after a short delay to let the engine load the track
+          Future.delayed(const Duration(milliseconds: 350), () {
+            _applyPosition(player, packet);
+          });
+        }
+        return; // don't seek on wrong track
+      }
+
+      // 2. Same track — just correct position + play state
+      _applyPosition(player, packet);
+    };
+  }
+
+  void _applyPosition(BloomeeMusicPlayer player, SyncPacket packet) {
+    final lag         = SyncService.instance.ntpNow() - packet.ntpTs;
+    final correctedMs = (packet.positionMs + lag + SyncService.instance.myOffsetMs)
+        .clamp(0, 9999999);
     player.seek(Duration(milliseconds: correctedMs));
     if (packet.playing) { player.play(); } else { player.pause(); }
   }
-
-  SeekCallback   get _seekCb => (pos) =>
-      context.read<BloomeePlayerCubit>().bloomeePlayer.seek(pos);
-
-  PositionGetter get _posCb  => () =>
-      context.read<BloomeePlayerCubit>().bloomeePlayer.engine.position;
 
   // ── Actions ──────────────────────────────────────────────────────────────
 
   Future<void> _createRoom() async {
     setState(() => _loading = true);
+    final player = context.read<BloomeePlayerCubit>().bloomeePlayer;
     await SyncService.instance.createRoom(
-      onSync: _onSync, onSeek: _seekCb, getPosition: _posCb);
+      onSync:      _makeCallback(player),
+      onSeek:      player.seek,
+      getPosition: () => player.engine.position,
+    );
     if (mounted) setState(() => _loading = false);
   }
 
@@ -102,8 +124,13 @@ class _SyncSheetState extends State<_SyncSheet>
     }
     _focusNode.unfocus();
     setState(() { _loading = true; _error = null; });
+    final player = context.read<BloomeePlayerCubit>().bloomeePlayer;
     final ok = await SyncService.instance.joinRoom(
-      stamp: stamp, onSync: _onSync, onSeek: _seekCb, getPosition: _posCb);
+      stamp:       stamp,
+      onSync:      _makeCallback(player),
+      onSeek:      player.seek,
+      getPosition: () => player.engine.position,
+    );
     if (mounted) setState(() {
       _loading = false;
       _error   = ok ? null : 'Room not found. Check the code.';

@@ -80,6 +80,13 @@ jobs:
           key: cargokit-aarch64-${{ hashFiles('rust_builder/Cargo.lock', 'rust_builder/src/**') }}
           restore-keys: cargokit-aarch64-
 
+
+      - name: Download FontAwesome fonts
+        run: |
+          mkdir -p assets/fonts/fontawesome-free-6.4.0-desktop/otfs
+          curl -L "https://github.com/FortAwesome/Font-Awesome/releases/download/6.4.0/fontawesome-free-6.4.0-desktop.zip" -o /tmp/fa.zip
+          unzip -j /tmp/fa.zip "fontawesome-free-6.4.0-desktop/otfs/*.otf" -d assets/fonts/fontawesome-free-6.4.0-desktop/otfs/
+
       - name: Install Dependencies
         run: flutter pub get
 
