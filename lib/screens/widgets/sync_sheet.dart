@@ -91,6 +91,7 @@ class _SyncSheetState extends State<_SyncSheet>
     _codeCtrl.dispose();
     _focusNode.dispose();
     _pulseCtrl.dispose();
+    _cancelScheduled();
     _pendingSeekSub?.cancel();
     for (final t in _debounceTimers.values) t.cancel();
     super.dispose();
@@ -108,63 +109,165 @@ class _SyncSheetState extends State<_SyncSheet>
   // Captures _player from field — no `context`, no `mounted` check needed.
   // Works correctly even after the sheet is dismissed.
 
+  // Scheduled-play timers — cancelled on each new packet.
+  Timer? _preSeekTimer;
+  Timer? _playTimer;
+
+  void _cancelScheduled() {
+    _preSeekTimer?.cancel();
+    _playTimer?.cancel();
+    _preSeekTimer = null;
+    _playTimer    = null;
+  }
+
+  // ── Core sync handler ─────────────────────────────────────────────────────
+  //
+  // Discrete events (seek, play/pause, track change) arrive with
+  // packet.scheduleAheadMs > 0. We use the pre-seek + scheduled-play
+  // trick to get ±30ms accuracy:
+  //
+  //   1. lag   = ntpNow() - packet.ntpTs  (how long ago host wrote this)
+  //   2. correctedMs = positionMs + lag + myOffset
+  //   3. scheduleInMs = scheduleAheadMs - lag  (time we have left)
+  //   4. if scheduleInMs >= 80ms:
+  //        pause → seek(correctedMs) → Timer(scheduleInMs - 50) → fine-seek
+  //        → Timer(scheduleInMs) → play()   [only play(), no seek — ~1-5ms]
+  //   5. if scheduleInMs < 80ms (packet arrived late):
+  //        fall back to immediate seek + play
+  //
+  // Drift correction (scheduleAheadMs == 0) skips scheduling entirely.
+  // Only seeks when drift > 2 s to avoid choppy re-seeks during playback.
+
   void _onSync(SyncPacket packet) {
-    final lag         = (SyncService.instance.ntpNow() - packet.ntpTs).clamp(-5000, 5000);
-    final myOffset    = SyncService.instance.myOffsetMs;
-    final correctedMs = (packet.positionMs + lag + myOffset).clamp(0, 9999999);
-
+    final lag      = (SyncService.instance.ntpNow() - packet.ntpTs)
+        .clamp(-5000, 5000) as int;
+    final myOffset = SyncService.instance.myOffsetMs;
+    final correctedMs =
+        (packet.positionMs + lag + myOffset).clamp(0, 9999999) as int;
     final currentId = _player.mediaItem.valueOrNull?.id;
+    final isDiscrete = packet.scheduleAheadMs > 0;
 
+    // ── Same track ───────────────────────────────────────────────────────────
     if (currentId == packet.trackId) {
       _pendingSeekSub?.cancel();
       _pendingSeekSub = null;
 
-      // Only seek on drift > 2 s — avoids constant choppy re-seeks.
-      final drift = (_player.engine.position.inMilliseconds - correctedMs).abs();
-      if (drift > 2000) _player.seek(Duration(milliseconds: correctedMs));
-
-      if (packet.playing && !_player.engine.playing)       _player.play();
-      else if (!packet.playing && _player.engine.playing)  _player.pause();
-    } else {
-      _pendingSeekSub?.cancel();
-      _pendingSeekSub = null;
-
-      final queue = _player.queue.valueOrNull ?? [];
-      final idx   = queue.indexWhere((mi) => mi.id == packet.trackId);
-
-      if (idx >= 0) {
-        _player.skipToQueueItem(idx);
-      } else if (packet.trackTitle.isNotEmpty) {
-        final track = Track(
-          id:         packet.trackId,
-          title:      packet.trackTitle,
-          artists:    packet.trackArtist.isNotEmpty
-              ? [ArtistSummary(id: '', name: packet.trackArtist)]
-              : [],
-          thumbnail:  Artwork(url: packet.trackThumbnail, layout: ImageLayout.square),
-          durationMs: packet.trackDurationMs != null
-              ? BigInt.from(packet.trackDurationMs!)
-              : null,
-          isExplicit: false,
-        );
-        _player.loadPlaylist(
-          tracksToPlaylist('Synced', [track]),
-          idx: 0, doPlay: packet.playing,
+      if (isDiscrete) {
+        _applyScheduled(
+          correctedMs:    correctedMs,
+          scheduleAheadMs: packet.scheduleAheadMs,
+          lag:            lag,
+          playing:        packet.playing,
         );
       } else {
-        return;
+        // Drift correction — no interruption, only seek when meaningfully off.
+        final drift =
+            (_player.engine.position.inMilliseconds - correctedMs).abs();
+        if (drift > 2000) _player.seek(Duration(milliseconds: correctedMs));
+        if (packet.playing && !_player.engine.playing)      _player.play();
+        else if (!packet.playing && _player.engine.playing) _player.pause();
       }
-
-      // Seek once the track is confirmed loaded.
-      _pendingSeekSub = _player.mediaItem.listen((mi) {
-        if (mi?.id == packet.trackId) {
-          _pendingSeekSub?.cancel();
-          _pendingSeekSub = null;
-          _player.seek(Duration(milliseconds: correctedMs));
-          if (packet.playing) _player.play(); else _player.pause();
-        }
-      });
+      return;
     }
+
+    // ── Track change ─────────────────────────────────────────────────────────
+    _cancelScheduled();
+    _pendingSeekSub?.cancel();
+    _pendingSeekSub = null;
+
+    final queue = _player.queue.valueOrNull ?? [];
+    final idx   = queue.indexWhere((mi) => mi.id == packet.trackId);
+
+    void seekAfterLoad() {
+      // After track loads, apply scheduled or immediate.
+      if (isDiscrete) {
+        _applyScheduled(
+          correctedMs:     correctedMs,
+          scheduleAheadMs: packet.scheduleAheadMs,
+          lag:             lag,
+          playing:         packet.playing,
+        );
+      } else {
+        _player.seek(Duration(milliseconds: correctedMs));
+        if (packet.playing) _player.play(); else _player.pause();
+      }
+    }
+
+    if (idx >= 0) {
+      _player.skipToQueueItem(idx);
+    } else if (packet.trackTitle.isNotEmpty) {
+      final track = Track(
+        id:         packet.trackId,
+        title:      packet.trackTitle,
+        artists:    packet.trackArtist.isNotEmpty
+            ? [ArtistSummary(id: '', name: packet.trackArtist)]
+            : [],
+        thumbnail:  Artwork(url: packet.trackThumbnail, layout: ImageLayout.square),
+        durationMs: packet.trackDurationMs != null
+            ? BigInt.from(packet.trackDurationMs!)
+            : null,
+        isExplicit: false,
+      );
+      _player.loadPlaylist(
+        tracksToPlaylist('Synced', [track]),
+        idx: 0, doPlay: false,
+      );
+    } else {
+      return;
+    }
+
+    _pendingSeekSub = _player.mediaItem.listen((mi) {
+      if (mi?.id == packet.trackId) {
+        _pendingSeekSub?.cancel();
+        _pendingSeekSub = null;
+        seekAfterLoad();
+      }
+    });
+  }
+
+  // ── Scheduled-play implementation ─────────────────────────────────────────
+
+  void _applyScheduled({
+    required int  correctedMs,
+    required int  scheduleAheadMs,
+    required int  lag,
+    required bool playing,
+  }) {
+    _cancelScheduled();
+
+    final scheduleInMs = scheduleAheadMs - lag;
+
+    if (scheduleInMs < 80) {
+      // Packet arrived too late to schedule — apply immediately.
+      _player.seek(Duration(milliseconds: correctedMs));
+      if (playing) _player.play() else _player.pause();
+      return;
+    }
+
+    // Where host will be at the scheduled moment.
+    final posAtSchedule = correctedMs + scheduleInMs;
+
+    // Step 1: pause + rough seek now (into already-buffered audio).
+    _player.pause();
+    _player.seek(Duration(milliseconds: correctedMs));
+
+    // Step 2: fine-correct 50ms before the scheduled moment.
+    // By this point seek() is long done; this snaps to exact position.
+    _preSeekTimer = Timer(
+      Duration(milliseconds: (scheduleInMs - 50).clamp(0, scheduleInMs)),
+      () {
+        _player.seek(Duration(milliseconds: posAtSchedule));
+      },
+    );
+
+    // Step 3: play() only at the scheduled moment (~1-5ms execution).
+    // No seek here — position is already correct from Step 2.
+    _playTimer = Timer(
+      Duration(milliseconds: scheduleInMs),
+      () {
+        if (playing) _player.play() else _player.pause();
+      },
+    );
   }
 
   // ── Connect / disconnect ──────────────────────────────────────────────────

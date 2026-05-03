@@ -215,11 +215,16 @@ class SyncPacket {
   final String trackThumbnail;
   final int?   trackDurationMs;
 
+  /// How far ahead (ms) the guest should schedule play() from now.
+  /// 0 = apply immediately (drift correction). >0 = scheduled-play event.
+  final int scheduleAheadMs;
+
   const SyncPacket({
     required this.trackId,
     required this.positionMs,
     required this.playing,
     required this.ntpTs,
+    this.scheduleAheadMs = 0,
     this.pushedBy        = '',
     this.trackTitle      = '',
     this.trackArtist     = '',
@@ -233,6 +238,7 @@ class SyncPacket {
     playing:         (map['playing']         as bool?)  ?? false,
     ntpTs:           (map['ntpTs']           as num?)?.toInt() ??
                      DateTime.now().millisecondsSinceEpoch,
+    scheduleAheadMs: (map['scheduleAheadMs'] as num?)?.toInt() ?? 0,
     pushedBy:        (map['pushedBy']        as String?) ?? '',
     trackTitle:      (map['trackTitle']      as String?) ?? '',
     trackArtist:     (map['trackArtist']     as String?) ?? '',
@@ -550,10 +556,14 @@ class SyncService {
 
   // ── Push state ────────────────────────────────────────────────────────────
 
+  /// [scheduleAheadMs] > 0 tells guests to schedule play() that many ms
+  /// from now rather than seeking immediately. Use for discrete events
+  /// (explicit seek, play/pause, track change). Leave 0 for drift correction.
   void pushState({
     required String trackId,
     required int    positionMs,
     required bool   playing,
+    int    scheduleAheadMs = 0,
     String trackTitle      = '',
     String trackArtist     = '',
     String trackThumbnail  = '',
@@ -568,6 +578,7 @@ class SyncService {
       'positionMs':     positionMs,
       'playing':        playing,
       'ntpTs':          ntpNow(),
+      'scheduleAheadMs': scheduleAheadMs,
       'pushedBy':       _deviceId,
       'trackTitle':     trackTitle,
       'trackArtist':    trackArtist,

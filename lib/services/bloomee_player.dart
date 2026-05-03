@@ -421,14 +421,16 @@ class BloomeeMusicPlayer extends BaseAudioHandler
   Future<void> seek(Duration position) async {
     if (_isDisposed) return;
     await engine.seek(position);
-    // Sync hook 3: broadcast explicit seek to guests immediately
+    // Sync hook 3: explicit seek — scheduled so guests pre-seek while
+    // paused then play() at a precise shared moment (±30ms accuracy).
     SyncService.instance.pushState(
-      trackId: _currentTrack.id,
-      positionMs: position.inMilliseconds,
-      playing: engine.playing,
-      trackTitle: _currentTrack.title,
-      trackArtist: _currentTrack.artists.map((a) => a.name).join(', '),
-      trackThumbnail: _currentTrack.thumbnail.url,
+      trackId:         _currentTrack.id,
+      positionMs:      position.inMilliseconds,
+      playing:         engine.playing,
+      scheduleAheadMs: 350,
+      trackTitle:      _currentTrack.title,
+      trackArtist:     _currentTrack.artists.map((a) => a.name).join(', '),
+      trackThumbnail:  _currentTrack.thumbnail.url,
       trackDurationMs: _currentTrack.durationMs?.toInt(),
     );
   }
@@ -721,9 +723,10 @@ class BloomeeMusicPlayer extends BaseAudioHandler
     mediaItem.add(trackToMediaItem(_currentTrack));
     // Sync hook 1: broadcast track change to guests immediately (position 0)
     SyncService.instance.pushState(
-      trackId: track.id,
-      positionMs: 0,
-      playing: engine.playing,
+      trackId:         track.id,
+      positionMs:      0,
+      playing:         engine.playing,
+      scheduleAheadMs: 350,
       trackTitle: track.title,
       trackArtist: track.artists.map((a) => a.name).join(', '),
       trackThumbnail: track.thumbnail.url,
