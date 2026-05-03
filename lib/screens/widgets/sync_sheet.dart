@@ -41,7 +41,7 @@ class _SyncSheetState extends State<_SyncSheet>
     with SingleTickerProviderStateMixin {
 
   // Player captured once in initState — safe to reference after sheet closes.
-  late final BloomeePlayer _player;
+  late final BloomeeMusicPlayer _player;
 
   // Pending one-shot sub that fires seek after a track-switch loads.
   // Lives on the state object — works even after sheet disposal.
