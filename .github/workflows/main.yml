@@ -27,9 +27,9 @@ jobs:
         with:
           flutter-version: '3.35.4'
           channel: 'stable'
-          cache: true
+          cache: true                      # caches Flutter SDK itself
 
-      # Pub cache — keyed on pubspec.lock
+      # Pub cache — keyed on pubspec.lock so it only invalidates on dep changes
       - name: Cache Pub dependencies
         uses: actions/cache@v4
         with:
@@ -37,7 +37,7 @@ jobs:
           key: pub-${{ hashFiles('pubspec.lock') }}
           restore-keys: pub-
 
-      # Gradle cache — task cache + wrapper
+      # Gradle cache — biggest win, saves ~2-3 min on cold builds
       - name: Cache Gradle
         uses: actions/cache@v4
         with:
@@ -47,45 +47,11 @@ jobs:
           key: gradle-${{ hashFiles('android/gradle/wrapper/gradle-wrapper.properties', 'android/app/build.gradle.kts') }}
           restore-keys: gradle-
 
-      # NDK cache — avoids 14s re-download every run
-      - name: Cache Android NDK
-        uses: actions/cache@v4
+      # Rust/Cargo cache — keyed on Cargo.lock, saves Rust compile time
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
         with:
-          path: /usr/local/lib/android/sdk/ndk
-          key: ndk-27.0.12077973
-      
-      # Android SDK platform cache — avoids platform 31+33 re-download
-      - name: Cache Android SDK Platforms
-        uses: actions/cache@v4
-        with:
-          path: /usr/local/lib/android/sdk/platforms
-          key: sdk-platforms-31-33
-
-      # Cargo registry cache (crate downloads)
-      - name: Cache Cargo registry
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: cargo-registry-${{ hashFiles('rust_builder/Cargo.lock') }}
-          restore-keys: cargo-registry-
-
-      # Cargokit compiled .so cache — keyed on Rust sources + Cargo.lock
-      # CARGOKIT_TARGET_TEMP_DIR is set to a stable path so it survives runs
-      - name: Cache Cargokit build output
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargokit-target
-          key: cargokit-aarch64-${{ hashFiles('rust_builder/Cargo.lock', 'rust_builder/src/**') }}
-          restore-keys: cargokit-aarch64-
-
-
-      - name: Download FontAwesome fonts
-        run: |
-          mkdir -p assets/fonts/fontawesome-free-6.4.0-desktop/otfs
-          curl -L "https://github.com/FortAwesome/Font-Awesome/releases/download/6.4.0/fontawesome-free-6.4.0-desktop.zip" -o /tmp/fa.zip
-          unzip -o -j /tmp/fa.zip "fontawesome-free-6.4.0-desktop/otfs/*.otf" -d assets/fonts/fontawesome-free-6.4.0-desktop/otfs/
+          workspaces: "rust"
 
       - name: Install Dependencies
         run: flutter pub get
@@ -105,9 +71,6 @@ jobs:
           echo keyAlias=dev >> android/key.properties
 
       - name: Build APK (arm64-v8a)
-        env:
-          # Redirect cargokit's Rust build output to the cached stable path
-          CARGOKIT_TARGET_TEMP_DIR: /home/runner/.cargokit-target
         run: flutter build apk --release --target-platform android-arm64 --build-number ${{ github.run_number }}
 
       - name: Rename APK
