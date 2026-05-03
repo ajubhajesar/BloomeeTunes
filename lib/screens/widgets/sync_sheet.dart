@@ -76,7 +76,7 @@ class _SyncSheetState extends State<_SyncSheet>
     final myOffset   = SyncService.instance.myOffsetMs;
     final correctedMs = (packet.positionMs + lag + myOffset).clamp(0, 9999999);
     player.seek(Duration(milliseconds: correctedMs));
-    if (packet.playing) player.play() else player.pause();
+    if (packet.playing) { player.play(); } else { player.pause(); }
   }
 
   SeekCallback   get _seekCb => (pos) =>

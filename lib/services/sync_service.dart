@@ -5,7 +5,7 @@ import 'dart:math' hide log;
 import 'dart:typed_data';
 
 import 'package:firebase_database/firebase_database.dart';
-import 'package:shared_preferences/shared_preferences.dart';
+import 'package:path_provider/path_provider.dart';
 
 typedef SyncCallback   = void Function(SyncPacket packet);
 typedef SeekCallback   = void Function(Duration position);
@@ -99,8 +99,6 @@ class NtpClock {
 // Stored in SharedPreferences so the same device always has the same name.
 
 class DeviceNamer {
-  static const _key = 'sync_device_name';
-
   static const _adj = [
     'Swift', 'Bold', 'Calm', 'Dusk', 'Epic', 'Fawn',
     'Gold', 'Hazy', 'Icy', 'Jade', 'Keen', 'Lush',
@@ -116,13 +114,18 @@ class DeviceNamer {
   ];
 
   static Future<String> get() async {
-    final prefs = await SharedPreferences.getInstance();
-    final saved = prefs.getString(_key);
-    if (saved != null) return saved;
-    final rng  = Random.secure();
-    final name = '${_adj[rng.nextInt(_adj.length)]} ${_noun[rng.nextInt(_noun.length)]}';
-    await prefs.setString(_key, name);
-    return name;
+    try {
+      final dir  = await getApplicationSupportDirectory();
+      final file = File('${dir.path}/sync_device_name.txt');
+      if (await file.exists()) return (await file.readAsString()).trim();
+      final rng  = Random.secure();
+      final name = '${_adj[rng.nextInt(_adj.length)]} ${_noun[rng.nextInt(_noun.length)]}';
+      await file.writeAsString(name);
+      return name;
+    } catch (_) {
+      final rng = Random.secure();
+      return '${_adj[rng.nextInt(_adj.length)]} ${_noun[rng.nextInt(_noun.length)]}';
+    }
   }
 }
 
