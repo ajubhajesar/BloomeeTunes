@@ -27,6 +27,31 @@ jobs:
         with:
           flutter-version: '3.35.4'
           channel: 'stable'
+          cache: true                      # caches Flutter SDK itself
+
+      # Pub cache — keyed on pubspec.lock so it only invalidates on dep changes
+      - name: Cache Pub dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.pub-cache
+          key: pub-${{ hashFiles('pubspec.lock') }}
+          restore-keys: pub-
+
+      # Gradle cache — biggest win, saves ~2-3 min on cold builds
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ hashFiles('android/gradle/wrapper/gradle-wrapper.properties', 'android/app/build.gradle.kts') }}
+          restore-keys: gradle-
+
+      # Rust/Cargo cache — keyed on Cargo.lock, saves Rust compile time
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "rust"
 
       - name: Install Dependencies
         run: flutter pub get
