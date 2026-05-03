@@ -1,0 +1,88 @@
+name: "Build Clone (Same-Device Test)"
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-clone:
+    name: Build Clone APK (arm64)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v3.12.0
+        with:
+          distribution: 'oracle'
+          java-version: '17'
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.35.4'
+          channel: 'stable'
+          cache: true
+
+      - name: Cache Pub dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.pub-cache
+          key: pub-${{ hashFiles('pubspec.lock') }}
+          restore-keys: pub-
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ hashFiles('android/gradle/wrapper/gradle-wrapper.properties', 'android/app/build.gradle.kts') }}
+          restore-keys: gradle-
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "rust"
+
+      - name: Install Dependencies
+        run: flutter pub get
+
+      - name: Patch applicationId to clone package
+        run: |
+          sed -i 's/applicationId = "ls.bloomee.musicplayer"/applicationId = "ls.bloomee.musicplayer.clone"/' \
+            android/app/build.gradle.kts
+          # Also patch namespace so resources don't clash
+          sed -i 's/namespace = "ls.bloomee.musicplayer"/namespace = "ls.bloomee.musicplayer.clone"/' \
+            android/app/build.gradle.kts
+
+      - name: Patch app label so you can tell them apart on homescreen
+        run: |
+          sed -i 's/android:label="[^"]*"/android:label="Bloomee Clone"/' \
+            android/app/src/main/AndroidManifest.xml
+
+      - name: Create keystore file
+        run: base64 -d android/dev.keystore.b64 > android/bloomee.jks
+
+      - name: Create keystore properties
+        run: |
+          echo keyPassword=devpass123 > android/key.properties
+          echo storePassword=devpass123 >> android/key.properties
+          echo keyAlias=dev >> android/key.properties
+
+      - name: Build Clone APK (arm64-v8a)
+        run: flutter build apk --release --target-platform android-arm64 --build-number ${{ github.run_number }}
+
+      - name: Rename APK
+        run: |
+          mv build/app/outputs/flutter-apk/app-release.apk \
+             build/app/outputs/flutter-apk/bloomee_clone_${{ github.run_number }}_arm64.apk
+
+      - name: Upload as artifact (no release — test build only)
+        uses: actions/upload-artifact@v4
+        with:
+          name: bloomee-clone-${{ github.run_number }}
+          path: build/app/outputs/flutter-apk/bloomee_clone_${{ github.run_number }}_arm64.apk
+          retention-days: 7
