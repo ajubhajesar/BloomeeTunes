@@ -163,9 +163,9 @@ class _SyncSheetState extends State<_SyncSheet>
         // Drift correction — no interruption, only seek when meaningfully off.
         final drift =
             (_player.engine.position.inMilliseconds - correctedMs).abs();
-        if (drift > 2000) _player.seek(Duration(milliseconds: correctedMs));
-        if (packet.playing && !_player.engine.playing)      _player.play();
-        else if (!packet.playing && _player.engine.playing) _player.pause();
+        if (drift > 2000) { _player.seek(Duration(milliseconds: correctedMs)); }
+        if (packet.playing && !_player.engine.playing)      { _player.play(); }
+        else if (!packet.playing && _player.engine.playing) { _player.pause(); }
       }
       return;
     }
@@ -189,7 +189,7 @@ class _SyncSheetState extends State<_SyncSheet>
         );
       } else {
         _player.seek(Duration(milliseconds: correctedMs));
-        if (packet.playing) _player.play(); else _player.pause();
+        if (packet.playing) { _player.play(); } else { _player.pause(); }
       }
     }
 
@@ -240,7 +240,7 @@ class _SyncSheetState extends State<_SyncSheet>
     if (scheduleInMs < 80) {
       // Packet arrived too late to schedule — apply immediately.
       _player.seek(Duration(milliseconds: correctedMs));
-      if (playing) _player.play() else _player.pause();
+      if (playing) { _player.play(); } else { _player.pause(); }
       return;
     }
 
@@ -265,7 +265,7 @@ class _SyncSheetState extends State<_SyncSheet>
     _playTimer = Timer(
       Duration(milliseconds: scheduleInMs),
       () {
-        if (playing) _player.play() else _player.pause();
+        if (playing) { _player.play(); } else { _player.pause(); }
       },
     );
   }
