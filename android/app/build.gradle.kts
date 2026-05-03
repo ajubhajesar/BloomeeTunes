@@ -27,14 +27,13 @@ android {
     }
 
     defaultConfig {
-        // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
         applicationId = "ls.bloomee.musicplayer"
-        // You can update the following values to match your application needs.
-        // For more information, see: https://flutter.dev/to/review-gradle-config.
         minSdk = flutter.minSdkVersion
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+        // Strip all non-English string resources — saves ~2-4MB
+        resourceConfigurations += setOf("en")
     }
 
     splits {
@@ -82,6 +81,13 @@ android {
 
     buildTypes {
         release {
+            // R8 code shrinking + resource shrinking — reduces APK by ~30-40%
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
             if (keystorePropertiesFile.exists()) {
                 signingConfig = signingConfigs.getByName("release")
                 println("   📦 Release build: Using release signing config")
